@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "acad-cmd"
+version = "0.1.0"
+description = "MCP server for AutoCAD command line I/O via COM"
+requires-python = ">=3.10"
+dependencies = [
+  "mcp>=1.0.0",
+  "pywin32>=306",
+]
+
+[project.scripts]
+acad-cmd = "acad_cmd.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/acad_cmd"]

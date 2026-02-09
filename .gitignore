@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.Python
+
+# Virtualenv
+.venv/
+venv/
+
+# Logs / runtime artifacts
+logs/
+*.log
+
+# Build / caches
+dist/
+build/
+*.db
+
+# Odd Windows artifacts seen in this repo
+nul
+nul-
+
+# OS/editor
+.DS_Store
+Thumbs.db

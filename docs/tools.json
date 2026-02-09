@@ -1,0 +1,101 @@
+{
+  "tools": [
+    {
+      "name": "send_command",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "command": {"type": "string"},
+          "wait": {"type": "boolean", "default": true},
+          "timeout_sec": {"type": "number", "default": 10},
+          "poll_interval_sec": {"type": "number", "default": 0.1}
+        },
+        "required": ["command"]
+      }
+    },
+    {
+      "name": "run_lisp",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "expr": {"type": "string"},
+          "wait": {"type": "boolean", "default": true},
+          "timeout_sec": {"type": "number", "default": 10}
+        },
+        "required": ["expr"]
+      }
+    },
+    {
+      "name": "load_lisp_file",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string"},
+          "wait": {"type": "boolean", "default": true},
+          "timeout_sec": {"type": "number", "default": 10}
+        },
+        "required": ["path"]
+      }
+    },
+    {
+      "name": "get_last_output",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": ["lastprompt", "logfile"],
+            "default": "lastprompt"
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "start_logging",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": ["logfile", "lastprompt"],
+            "default": "logfile"
+          },
+          "logfile_path": {"type": ["string", "null"], "default": null},
+          "reset": {"type": "boolean", "default": false}
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "get_new_output_since",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "stream_id": {"type": "string"},
+          "cursor": {"type": "integer", "minimum": 0},
+          "max_bytes": {"type": "integer", "minimum": 1, "default": 65536}
+        },
+        "required": ["stream_id", "cursor"]
+      }
+    },
+    {
+      "name": "stop_logging",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "stream_id": {"type": "string"}
+        },
+        "required": ["stream_id"]
+      }
+    },
+    {
+      "name": "get_status",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    }
+  ]
+}
