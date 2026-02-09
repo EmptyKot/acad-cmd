@@ -11,6 +11,7 @@ venv/
 # Logs / runtime artifacts
 logs/
 *.log
+out/
 
 # Build / caches
 dist/
