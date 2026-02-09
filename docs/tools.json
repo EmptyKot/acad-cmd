@@ -96,6 +96,80 @@
         "properties": {},
         "required": []
       }
+    },
+    {
+      "name": "dict_list",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "dict_xrecord_get",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "dict_name": {"type": "string"},
+          "key": {"type": "string"}
+        },
+        "required": ["dict_name", "key"]
+      }
+    },
+    {
+      "name": "dict_keys",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "dict_name": {"type": "string"}
+        },
+        "required": ["dict_name"]
+      }
+    },
+    {
+      "name": "dict_xrecord_set",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "dict_name": {"type": "string"},
+          "key": {"type": "string"},
+          "values": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "code": {"type": "integer"},
+                "value": {"type": ["string", "number", "boolean", "array", "null"]}
+              },
+              "required": ["code", "value"]
+            }
+          },
+          "overwrite": {"type": "boolean", "default": true}
+        },
+        "required": ["dict_name", "key", "values"]
+      }
+    },
+    {
+      "name": "dict_xrecord_delete",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "dict_name": {"type": "string"},
+          "key": {"type": "string"}
+        },
+        "required": ["dict_name", "key"]
+      }
+    },
+    {
+      "name": "dict_delete",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "dict_name": {"type": "string"},
+          "recursive": {"type": "boolean", "default": true}
+        },
+        "required": ["dict_name"]
+      }
     }
   ]
 }
