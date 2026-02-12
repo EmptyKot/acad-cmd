@@ -1,9 +1,10 @@
 import os
 import json
+import time
 
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from mcp.server.fastmcp import FastMCP, Context
 
@@ -74,6 +75,44 @@ def _extract_mcp_json(text: str) -> Dict[str, Any]:
     return obj
 
 
+def _extract_mcp_json_messages(text: str) -> List[Dict[str, Any]]:
+    """Extract all MCP JSON marker payloads from text.
+
+    Intended for streaming protocols where many small JSON objects are emitted.
+    """
+
+    out: List[Dict[str, Any]] = []
+    if not text:
+        return out
+    for line in text.splitlines():
+        if _MCP_JSON_MARKER not in line:
+            continue
+        idx = line.rfind(_MCP_JSON_MARKER)
+        payload = line[idx + len(_MCP_JSON_MARKER) :].strip()
+        if not payload:
+            continue
+        try:
+            obj = json.loads(payload)
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            out.append(obj)
+    return out
+
+
+def _consume_complete_lines(buf: str) -> Tuple[List[str], str]:
+    """Split buffer into complete lines and a remainder (no trailing newline)."""
+
+    if not buf:
+        return [], ""
+    last_nl = buf.rfind("\n")
+    if last_nl < 0:
+        return [], buf
+    chunk = buf[: last_nl + 1]
+    rest = buf[last_nl + 1 :]
+    return chunk.splitlines(), rest
+
+
 def _ensure_logfile_stream(ctx: Context) -> Optional[str]:
     """Ensure default output stream is a logfile stream; return temp stream_id if created."""
 
@@ -111,11 +150,8 @@ def _run_lisp_json(ctx: Context, expr: str, *, timeout_sec: float = 10.0) -> Dic
                 pass
 
 
-_MCP_DICT_LISP_LIB = r"""
-(progn
-  (if (not (fboundp 'mcp--emit-json))
-    (progn
-      (defun mcp--json-escape (s / i c out)
+_MCP_DICT_LISP_LIB = r"""(progn
+  (defun mcp--json-escape (s / i c out)
         (setq out "")
         (setq i 1)
         (while (<= i (strlen s))
@@ -134,8 +170,10 @@ _MCP_DICT_LISP_LIB = r"""
         (strcat "\"" (mcp--json-escape s) "\"")
       )
 
-      (defun mcp--json-real (r)
-        (vl-string-right-trim "." (vl-string-right-trim "0" (rtos r 2 15)))
+      (defun mcp--json-real (r / s)
+        ;; Ensure 0.0 serializes as "0" (not empty string).
+        (setq s (vl-string-right-trim "." (vl-string-right-trim "0" (rtos r 2 15))))
+        (if (= s "") "0" s)
       )
 
       (defun mcp--json-value (v)
@@ -401,7 +439,7 @@ _MCP_DICT_LISP_LIB = r"""
         )
       )
 
-      (defun mcp-dict-delete (dictName recursive / nod d it k obj n)
+  (defun mcp-dict-delete (dictName recursive / nod d it k obj n)
         (setq nod (mcp--nod))
         (setq d (mcp--dict-by-name dictName))
         (if (not d)
@@ -431,15 +469,221 @@ _MCP_DICT_LISP_LIB = r"""
             )
           )
         )
-      )
-    )
   )
+  (princ)
+ )
+  """
+
+
+_MCP_SELECTION_LISP_LIB = _MCP_DICT_LISP_LIB + r"""(progn
+  (vl-load-com)
+
+      (defun mcp--emit-sel-start (req_id count errno)
+        (mcp--emit-json
+          (strcat
+            "{\"ok\":true,\"req_id\":" (mcp--json-value req_id)
+            ",\"event\":\"start\""
+            ",\"count\":" (itoa count)
+            ",\"errno\":" (itoa errno)
+            "}"
+          )
+        )
+      )
+
+      (defun mcp--emit-sel-item-begin-lite (req_id i handle etype)
+        (mcp--emit-json
+          (strcat
+            "{\"ok\":true,\"req_id\":" (mcp--json-value req_id)
+            ",\"event\":\"item_begin\""
+            ",\"i\":" (itoa i)
+            ",\"handle\":" (mcp--json-value handle)
+            ",\"type\":" (mcp--json-value etype)
+            "}"
+          )
+        )
+      )
+
+      (defun mcp--emit-sel-done (req_id)
+        (mcp--emit-json
+          (strcat
+            "{\"ok\":true,\"req_id\":" (mcp--json-value req_id)
+            ",\"event\":\"done\"}"
+          )
+        )
+      )
+
+      (defun mcp-selection--emit-from-ss-lite (req_id ss max_objects / errno total n i ename el handle etype)
+        (setq errno (getvar "ERRNO"))
+        (setq total (if ss (sslength ss) 0))
+        (setq n total)
+        (if (and max_objects (> max_objects 0) (> n max_objects))
+          (setq n max_objects)
+        )
+        (mcp--emit-sel-start req_id n errno)
+        (setq i 0)
+        (while (< i n)
+          (setq ename (ssname ss i))
+          (setq el (entget ename))
+          (setq handle (cdr (assoc 5 el)))
+          (setq etype (cdr (assoc 0 el)))
+          (mcp--emit-sel-item-begin-lite req_id i handle etype)
+          (setq i (+ i 1))
+        )
+        (mcp--emit-sel-done req_id)
+      )
+
+      (defun mcp-selection-implied-lite (req_id max_objects / ss)
+        ;; Implied (PickFirst) selection only; never prompt the user.
+        (setq ss (ssget "_I"))
+        (mcp-selection--emit-from-ss-lite req_id ss max_objects)
+      )
+
+      (defun mcp-selection-prompt-lite (req_id prompt_str filter_list max_objects / ss)
+        ;; Interactive selection set (user picks in UI).
+        (if prompt_str (prompt (strcat "\n" prompt_str)))
+        (if filter_list
+          (setq ss (ssget filter_list))
+          (setq ss (ssget))
+        )
+        (mcp-selection--emit-from-ss-lite req_id ss max_objects)
+      )
+  (princ)
 )
 """
 
 
+def _collect_selection_stream_lite(
+    ctx: Context,
+    *,
+    req_id: str,
+    timeout_sec: float,
+    poll_interval_sec: float = 0.2,
+    max_bytes: int = 65536,
+    initial_text: str = "",
+    cursor: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Collect streamed selection messages emitted as [MCP:JSON] lines.
+
+    Lite variant: returns only handle + type for each object.
+    """
+
+    stream = state.streams.get_default()
+    if not stream or stream.mode != "logfile" or not stream.logfile_path:
+        raise RuntimeError("No active logfile stream")
+
+    cur = int(cursor if cursor is not None else stream.cursor)
+    buf = ""
+
+    started: Optional[Dict[str, Any]] = None
+    items: Dict[int, Dict[str, Any]] = {}
+    order: List[int] = []
+    timed_out = False
+
+    def _handle_msgs(msgs: List[Dict[str, Any]]) -> bool:
+        nonlocal started
+        for m in msgs:
+            if not isinstance(m, dict):
+                continue
+            if m.get("req_id") != req_id:
+                continue
+            if m.get("ok") is False:
+                raise RuntimeError(str(m.get("error") or "Unknown AutoLISP error"))
+            ev = m.get("event")
+            if ev == "start":
+                started = m
+            elif ev == "item_begin":
+                i = int(m.get("i") or 0)
+                items[i] = {
+                    "handle": m.get("handle"),
+                    "type": m.get("type"),
+                }
+                if i not in order:
+                    order.append(i)
+            elif ev == "done":
+                return True
+        return False
+
+    # Consume messages already captured in the send_command log block.
+    if initial_text:
+        msgs = _extract_mcp_json_messages(initial_text)
+        if _handle_msgs(msgs):
+            started_local = started
+            objs = [items[i] for i in sorted(order)]
+            count = None
+            errno = None
+            if isinstance(started_local, dict):
+                try:
+                    count = int(started_local.get("count"))
+                except Exception:
+                    count = None
+                try:
+                    errno = int(started_local.get("errno"))
+                except Exception:
+                    errno = None
+            return {
+                "req_id": req_id,
+                "count": count if count is not None else len(objs),
+                "errno": errno,
+                "objects": objs,
+                "timed_out": False,
+                "cursor": cur,
+            }
+
+    t0 = time.time()
+    while True:
+        if time.time() - t0 >= timeout_sec:
+            timed_out = True
+            break
+
+        text, new_cursor, _tr = state.streams.read_new(stream.stream_id, cur, max_bytes)
+        cur = int(new_cursor)
+        if text:
+            buf += text
+            lines, buf = _consume_complete_lines(buf)
+            if lines:
+                msgs = _extract_mcp_json_messages("\n".join(lines))
+                if _handle_msgs(msgs):
+                    break
+        else:
+            time.sleep(poll_interval_sec)
+
+    objs = [items[i] for i in sorted(order)]
+
+    count = None
+    errno = None
+    if isinstance(started, dict):
+        try:
+            count = int(started.get("count"))
+        except Exception:
+            count = None
+        try:
+            errno = int(started.get("errno"))
+        except Exception:
+            errno = None
+
+    return {
+        "req_id": req_id,
+        "count": count if count is not None else len(objs),
+        "errno": errno,
+        "objects": objs,
+        "timed_out": timed_out,
+        "cursor": cur,
+    }
+
+
 def _lisp_string(s: str) -> str:
     return '"' + lisp_quote_string(s) + '"'
+
+
+def _lisp_concat(prefix: str, suffix: str) -> str:
+    """Concatenate LISP snippets with exactly one newline between.
+
+    Leading blank lines sent to SendCommand act like pressing Enter in AutoCAD
+    and can re-run the previous command. This helper prevents accidental empty
+    commands when combining large multi-line LISP blocks.
+    """
+
+    return prefix.rstrip("\r\n") + "\n" + suffix.lstrip("\r\n")
 
 
 def _lisp_typed_values(values: Any) -> str:
@@ -811,7 +1055,7 @@ def dict_list(ctx: Context) -> Dict[str, Any]:
     """List top-level dictionaries from Named Objects Dictionary."""
 
     _ensure_connected()
-    expr = _MCP_DICT_LISP_LIB + "\n(mcp-dict-list)\n"
+    expr = _lisp_concat(_MCP_DICT_LISP_LIB, "(mcp-dict-list)\n")
     obj = _run_lisp_json(ctx, expr)
     return _strip_ok(obj)
 
@@ -823,7 +1067,7 @@ def dict_keys(ctx: Context, dict_name: str) -> Dict[str, Any]:
     _ensure_connected()
     if not dict_name:
         raise ValueError("dict_name must be non-empty")
-    expr = _MCP_DICT_LISP_LIB + f"\n(mcp-dict-keys {_lisp_string(dict_name)})\n"
+    expr = _lisp_concat(_MCP_DICT_LISP_LIB, f"(mcp-dict-keys {_lisp_string(dict_name)})\n")
     obj = _run_lisp_json(ctx, expr)
     return _strip_ok(obj)
 
@@ -837,7 +1081,10 @@ def dict_xrecord_get(ctx: Context, dict_name: str, key: str) -> Dict[str, Any]:
         raise ValueError("dict_name must be non-empty")
     if not key:
         raise ValueError("key must be non-empty")
-    expr = _MCP_DICT_LISP_LIB + f"\n(mcp-xrecord-get {_lisp_string(dict_name)} {_lisp_string(key)})\n"
+    expr = _lisp_concat(
+        _MCP_DICT_LISP_LIB,
+        f"(mcp-xrecord-get {_lisp_string(dict_name)} {_lisp_string(key)})\n",
+    )
     obj = _run_lisp_json(ctx, expr)
     return _strip_ok(obj)
 
@@ -859,7 +1106,10 @@ def dict_xrecord_set(
         raise ValueError("key must be non-empty")
     values_expr = _lisp_typed_values(values)
     ow = "T" if overwrite else "nil"
-    expr = _MCP_DICT_LISP_LIB + f"\n(mcp-xrecord-set {_lisp_string(dict_name)} {_lisp_string(key)} {values_expr} {ow})\n"
+    expr = _lisp_concat(
+        _MCP_DICT_LISP_LIB,
+        f"(mcp-xrecord-set {_lisp_string(dict_name)} {_lisp_string(key)} {values_expr} {ow})\n",
+    )
     obj = _run_lisp_json(ctx, expr)
     return _strip_ok(obj)
 
@@ -873,7 +1123,10 @@ def dict_xrecord_delete(ctx: Context, dict_name: str, key: str) -> Dict[str, Any
         raise ValueError("dict_name must be non-empty")
     if not key:
         raise ValueError("key must be non-empty")
-    expr = _MCP_DICT_LISP_LIB + f"\n(mcp-xrecord-delete {_lisp_string(dict_name)} {_lisp_string(key)})\n"
+    expr = _lisp_concat(
+        _MCP_DICT_LISP_LIB,
+        f"(mcp-xrecord-delete {_lisp_string(dict_name)} {_lisp_string(key)})\n",
+    )
     obj = _run_lisp_json(ctx, expr)
     return _strip_ok(obj)
 
@@ -886,9 +1139,120 @@ def dict_delete(ctx: Context, dict_name: str, recursive: bool = True) -> Dict[st
     if not dict_name:
         raise ValueError("dict_name must be non-empty")
     rec = "T" if recursive else "nil"
-    expr = _MCP_DICT_LISP_LIB + f"\n(mcp-dict-delete {_lisp_string(dict_name)} {rec})\n"
+    expr = _lisp_concat(_MCP_DICT_LISP_LIB, f"(mcp-dict-delete {_lisp_string(dict_name)} {rec})\n")
     obj = _run_lisp_json(ctx, expr)
     return _strip_ok(obj)
+
+
+@mcp.tool()
+def selection(
+    ctx: Context,
+    timeout_sec: float = 300.0,
+    prompt: Optional[str] = None,
+    filter: Any = None,
+    max_objects: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Get currently selected objects, or prompt the user to select objects.
+
+    Returns only handle + type for each selected object.
+    """
+
+    _ensure_connected()
+    dwg = state.bridge.get_dwg_label()
+
+    temp_stream_id = _ensure_logfile_stream(ctx)
+    try:
+        stream = state.streams.get_default()
+        if not stream:
+            raise RuntimeError("No default stream")
+
+        mo = int(max_objects) if max_objects is not None else -1
+
+        # 1) Try implied (PickFirst) selection.
+        req_id1 = str(uuid.uuid4())
+        cursor0 = int(stream.cursor)
+        expr1 = _lisp_concat(
+            _MCP_SELECTION_LISP_LIB,
+            f"(mcp-selection-implied-lite {_lisp_string(req_id1)} {mo})\n",
+        )
+        r1 = send_command(ctx, expr1, wait=True, timeout_sec=min(10.0, float(timeout_sec)))
+        log_block1 = r1.get("log") or {}
+        initial_text1 = str(log_block1.get("text") or "")
+        cursor1 = log_block1.get("cursor")
+        out1 = _collect_selection_stream_lite(
+            ctx,
+            req_id=req_id1,
+            timeout_sec=min(10.0, float(timeout_sec)),
+            initial_text=initial_text1,
+            cursor=int(cursor1) if cursor1 is not None else cursor0,
+        )
+        out1["dwg"] = dwg
+        state.audit.log(
+            "selection",
+            {
+                "phase": "implied",
+                "req_id": req_id1,
+                "max_objects": max_objects,
+                "count": out1.get("count"),
+                "timed_out": out1.get("timed_out"),
+            },
+            dwg=dwg,
+        )
+
+        if not out1.get("timed_out") and int(out1.get("count") or 0) > 0:
+            return out1
+
+        # 2) If nothing selected, prompt interactively.
+        try:
+            cmdactive = int(state.bridge.get_variable("CMDACTIVE") or 0)
+        except Exception:
+            cmdactive = 0
+        if cmdactive != 0:
+            raise RuntimeError(f"AutoCAD is busy (CMDACTIVE={cmdactive}); cannot prompt for selection")
+
+        req_id2 = str(uuid.uuid4())
+        prompt_expr = _lisp_string(prompt) if prompt else "nil"
+        filter_expr = _lisp_typed_values(filter) if filter is not None else "nil"
+
+        expr2 = _lisp_concat(
+            _MCP_SELECTION_LISP_LIB,
+            f"(mcp-selection-prompt-lite {_lisp_string(req_id2)} {prompt_expr} {filter_expr} {mo})\n",
+        )
+
+        # Critical: interactive ssget must be the last input in this SendCommand.
+        r2 = send_command(ctx, expr2, wait=False, timeout_sec=0.1)
+        log_block2 = r2.get("log") or {}
+        initial_text2 = str(log_block2.get("text") or "")
+        cursor2 = log_block2.get("cursor")
+        out2 = _collect_selection_stream_lite(
+            ctx,
+            req_id=req_id2,
+            timeout_sec=float(timeout_sec),
+            initial_text=initial_text2,
+            cursor=int(cursor2) if cursor2 is not None else int(out1.get("cursor") or stream.cursor),
+        )
+        out2["dwg"] = dwg
+        state.audit.log(
+            "selection",
+            {
+                "phase": "prompt",
+                "req_id": req_id2,
+                "timeout_sec": timeout_sec,
+                "prompt": prompt,
+                "has_filter": filter is not None,
+                "max_objects": max_objects,
+                "count": out2.get("count"),
+                "timed_out": out2.get("timed_out"),
+            },
+            dwg=dwg,
+        )
+        return out2
+    finally:
+        if temp_stream_id:
+            try:
+                stop_logging(ctx, temp_stream_id)
+            except Exception:
+                pass
 
 
 def main() -> None:

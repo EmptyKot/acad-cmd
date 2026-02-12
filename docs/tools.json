@@ -170,6 +170,30 @@
         },
         "required": ["dict_name"]
       }
+    },
+    {
+      "name": "selection",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "timeout_sec": {"type": "number", "default": 300},
+          "prompt": {"type": ["string", "null"], "default": null},
+          "filter": {
+            "type": ["array", "null"],
+            "default": null,
+            "items": {
+              "type": "object",
+              "properties": {
+                "code": {"type": "integer"},
+                "value": {"type": ["string", "number", "boolean", "array", "null"]}
+              },
+              "required": ["code", "value"]
+            }
+          },
+          "max_objects": {"type": ["integer", "null"], "default": null}
+        },
+        "required": []
+      }
     }
   ]
 }
