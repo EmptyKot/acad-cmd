@@ -1,5 +1,4 @@
 import os
-from typing import Tuple
 
 
 def normalize_path_for_autocad(path: str) -> str:

@@ -67,7 +67,7 @@ def _get_target_major() -> Optional[int]:
         return None
 
 
-def _allow_new_instance(target_major: Optional[int]) -> bool:
+def _allow_new_instance() -> bool:
     # If explicitly configured, obey it.
     raw = (os.environ.get("AUTOCAD_MCP_ALLOW_NEW_INSTANCE") or "").strip().lower()
     if raw:
@@ -219,7 +219,7 @@ class AutoCADBridge:
         _com_init()
 
         target_major = _get_target_major()
-        allow_new = _allow_new_instance(target_major)
+        allow_new = _allow_new_instance()
 
         def _attach(progid: str):
             self._acad = win32com.client.GetActiveObject(progid)
