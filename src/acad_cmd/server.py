@@ -472,7 +472,7 @@ _MCP_DICT_LISP_LIB = r"""(progn
   )
   (princ)
  )
-  """
+"""
 
 
 _MCP_SELECTION_LISP_LIB = _MCP_DICT_LISP_LIB + r"""(progn
