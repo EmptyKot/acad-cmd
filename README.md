@@ -121,8 +121,9 @@ All tools return JSON (FastMCP commonly wraps results as `{ "result": ... }`).
   - sends `(load "...")` (path normalized for AutoCAD)
 - `run_lisp(expr, wait=true, timeout_sec=10)`
   - executes an AutoLISP expression/script via `SendCommand` with start/end markers in the command history
-- `selection(timeout_sec=300, prompt=null, filter=null, max_objects=null)`
+- `selection(timeout_sec=300, prompt=null, filter=null, max_objects=null, alert_message=null)`
   - returns currently selected objects (PickFirst); if none, prompts the user to select objects
+  - when `alert_message` is provided and interactive selection is needed, shows standard AutoCAD `alert`
   - returns only `handle` + `type` for each object
 
 ## Troubleshooting notes

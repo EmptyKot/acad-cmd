@@ -500,6 +500,7 @@ def selection(
     prompt: Optional[str] = None,
     filter: Any = None,
     max_objects: Optional[int] = None,
+    alert_message: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Get currently selected objects, or prompt the user to select objects.
 
@@ -562,11 +563,12 @@ def selection(
 
         req_id2 = str(uuid.uuid4())
         prompt_expr = _lisp_string(prompt) if prompt else "nil"
+        alert_expr = _lisp_string(alert_message) if alert_message else "nil"
         filter_expr = _lisp_typed_values(filter) if filter is not None else "nil"
 
         expr2 = _lisp_concat(
             _MCP_SELECTION_LISP_LIB,
-            f"(mcp-selection-prompt-lite {_lisp_string(req_id2)} {prompt_expr} {filter_expr} {mo})\n",
+            f"(mcp-selection-prompt-lite {_lisp_string(req_id2)} {prompt_expr} {alert_expr} {filter_expr} {mo})\n",
         )
 
         # Critical: interactive ssget must be the last input in this SendCommand.
@@ -590,6 +592,7 @@ def selection(
                 "req_id": req_id2,
                 "timeout_sec": timeout_sec,
                 "prompt": prompt,
+                "has_alert_message": bool(alert_message),
                 "has_filter": filter is not None,
                 "max_objects": max_objects,
                 "count": out2.get("count"),

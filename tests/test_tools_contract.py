@@ -185,12 +185,16 @@ class ToolsContractTests(unittest.TestCase):
                     "cursor": 106,
                 }
                 with patch("acad_cmd.tools.send_command", return_value={"log": {"text": "", "cursor": 106}}) as send_cmd:
-                    out = tools.selection(None, timeout_sec=2.0, max_objects=1)
+                    out = tools.selection(None, timeout_sec=2.0, max_objects=1, alert_message="Select one LINE")
 
         self.assertEqual(out["dwg"], "D:/tmp/Test1.dwg")
         self.assertEqual(out["count"], 1)
         self.assertEqual(out["objects"][0]["handle"], "10A")
         self.assertEqual(send_cmd.call_count, 1)
+        first_expr = send_cmd.call_args_list[0].args[1]
+        self.assertIn("(mcp-selection-implied-lite", first_expr)
+        self.assertNotIn("(mcp-selection-prompt-lite", first_expr)
+        self.assertNotIn("Select one LINE", first_expr)
 
         phases = [payload["phase"] for event, payload, _ in fake.audit.events if event == "selection"]
         self.assertEqual(phases, ["implied"])
@@ -222,11 +226,20 @@ class ToolsContractTests(unittest.TestCase):
                         {"log": {"text": "", "cursor": 106}},
                         {"log": {"text": "", "cursor": 110}},
                     ]
-                    out = tools.selection(None, timeout_sec=3.0, prompt="Pick one", max_objects=1)
+                    out = tools.selection(
+                        None,
+                        timeout_sec=3.0,
+                        prompt="Pick one",
+                        max_objects=1,
+                        alert_message="Select exactly one circle",
+                    )
 
         self.assertEqual(out["count"], 1)
         self.assertEqual(out["objects"][0]["type"], "CIRCLE")
         self.assertEqual(send_cmd.call_count, 2)
+        prompt_expr = send_cmd.call_args_list[1].args[1]
+        self.assertIn("(mcp-selection-prompt-lite", prompt_expr)
+        self.assertIn("\"Select exactly one circle\"", prompt_expr)
         phases = [payload["phase"] for event, payload, _ in fake.audit.events if event == "selection"]
         self.assertEqual(phases, ["implied", "prompt"])
 

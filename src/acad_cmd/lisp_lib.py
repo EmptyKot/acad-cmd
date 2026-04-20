@@ -386,8 +386,9 @@ MCP_SELECTION_LISP_LIB = MCP_DICT_LISP_LIB + r"""(progn
         (mcp-selection--emit-from-ss-lite req_id ss max_objects)
       )
 
-      (defun mcp-selection-prompt-lite (req_id prompt_str filter_list max_objects / ss)
+      (defun mcp-selection-prompt-lite (req_id prompt_str alert_str filter_list max_objects / ss)
         ;; Interactive selection set (user picks in UI).
+        (if alert_str (alert alert_str))
         (if prompt_str (prompt (strcat "\n" prompt_str)))
         (if filter_list
           (setq ss (ssget filter_list))
