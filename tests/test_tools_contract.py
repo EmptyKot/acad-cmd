@@ -29,9 +29,27 @@ class _FakeBridge:
     def __init__(self) -> None:
         self.acad = SimpleNamespace(HWND=0)
         self.last_sent = None
+        self._status_snapshot = {
+            "connected": True,
+            "busy": False,
+            "stale": False,
+            "source": "live",
+            "error_class": None,
+            "error_message": None,
+            "dwg": "D:/tmp/Test1.dwg",
+            "acadver": "24.0s (LMS Tech)",
+            "acad_hwnd": 0,
+            "acad_pid": None,
+            "cmdactive": 0,
+            "locked_major": 24,
+            "bound_progid": "AutoCAD.Application.24",
+        }
 
     def ensure_connection(self) -> bool:
         return True
+
+    def get_status_snapshot(self):
+        return dict(self._status_snapshot)
 
     def get_dwg_label(self):
         return "D:/tmp/Test1.dwg"
@@ -106,9 +124,13 @@ class ToolsContractTests(unittest.TestCase):
         self.assertIn("dwg", res)
         self.assertIn("acadver", res)
         self.assertIn("default_stream", res)
+        self.assertIn("busy", res)
+        self.assertIn("stale", res)
+        self.assertIn("source", res)
         self.assertEqual(res["session_id"], "session-test")
         self.assertEqual(res["connected"], True)
         self.assertEqual(res["dwg"], "D:/tmp/Test1.dwg")
+        self.assertEqual(res["source"], "live")
 
     def test_send_command_contract_with_log_block(self) -> None:
         fake = _make_fake_state()

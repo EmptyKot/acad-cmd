@@ -139,37 +139,75 @@ def _get_current_logfilename() -> Optional[str]:
 
 @mcp.tool()
 def get_status(ctx: Context) -> Dict[str, Any]:
-    connected = state.bridge.ensure_connection()
-    dwg = state.bridge.get_dwg_label() if connected else None
-    acadver = None
-    hwnd = None
-    pid = None
-    if connected:
+    snapshot = None
+    if hasattr(state.bridge, "get_status_snapshot"):
         try:
-            acadver = str(state.bridge.get_variable("ACADVER"))
+            snapshot = state.bridge.get_status_snapshot()
         except Exception:
-            acadver = None
-        try:
-            hwnd = int(getattr(state.bridge.acad, "HWND", 0) or 0)
-        except Exception:
-            hwnd = None
-        if hwnd:
-            try:
-                import win32process
+            snapshot = None
 
-                _tid, pidv = win32process.GetWindowThreadProcessId(hwnd)
-                pid = int(pidv)
+    if isinstance(snapshot, dict):
+        connected = bool(snapshot.get("connected"))
+        dwg = snapshot.get("dwg")
+        acadver = snapshot.get("acadver")
+        hwnd = snapshot.get("acad_hwnd")
+        pid = snapshot.get("acad_pid")
+        cmdactive = snapshot.get("cmdactive")
+        busy = bool(snapshot.get("busy"))
+        stale = bool(snapshot.get("stale"))
+        source = str(snapshot.get("source") or "live")
+        error_class = snapshot.get("error_class")
+        error_message = snapshot.get("error_message")
+        locked_major = snapshot.get("locked_major")
+        bound_progid = snapshot.get("bound_progid")
+    else:
+        connected = state.bridge.ensure_connection()
+        dwg = state.bridge.get_dwg_label() if connected else None
+        acadver = None
+        hwnd = None
+        pid = None
+        cmdactive = None
+        busy = False
+        stale = False
+        source = "live" if connected else "none"
+        error_class = None
+        error_message = None
+        locked_major = None
+        bound_progid = None
+        if connected:
+            try:
+                acadver = str(state.bridge.get_variable("ACADVER"))
             except Exception:
-                pid = None
+                acadver = None
+            try:
+                hwnd = int(getattr(state.bridge.acad, "HWND", 0) or 0)
+            except Exception:
+                hwnd = None
+            if hwnd:
+                try:
+                    import win32process
+
+                    _tid, pidv = win32process.GetWindowThreadProcessId(hwnd)
+                    pid = int(pidv)
+                except Exception:
+                    pid = None
     default_stream = state.streams.get_default()
     return {
         "ts": iso_now(),
         "session_id": state.session_id,
         "connected": connected,
+        "busy": busy,
+        "stale": stale,
+        "source": source,
+        "error_class": error_class,
+        "error_message": error_message,
         "dwg": dwg,
         "acadver": acadver,
         "acad_hwnd": hwnd,
         "acad_pid": pid,
+        "cmdactive": cmdactive,
+        "locked_major": locked_major,
+        "bound_progid": bound_progid,
         "default_stream": (
             {
                 "stream_id": default_stream.stream_id,

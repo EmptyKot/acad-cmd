@@ -103,6 +103,8 @@ All tools return JSON (FastMCP commonly wraps results as `{ "result": ... }`).
 
 - `get_status()`
   - returns connection info (DWG label, `ACADVER`, window handle / PID when available) and default stream details
+  - includes stability fields for busy/degraded states: `busy`, `stale`, `source`, `error_class`, `cmdactive`
+  - includes binding info to avoid cross-version drift: `locked_major`, `bound_progid`
 - `send_command(command, timeout_sec, wait=true, poll_interval_sec=0.1)`
   - sends raw command line text; when `wait=true` waits until AutoCAD is idle or timeout
   - if a default logfile stream is active, also returns a `log` block with new output and updated cursor

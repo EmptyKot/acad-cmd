@@ -4,7 +4,7 @@ import subprocess
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import pythoncom
 import pywintypes
@@ -166,6 +166,54 @@ class AutoCADBridge:
         self._acad = None
         self._doc = None
         self._connected = False
+        self._locked_major: Optional[int] = None
+        self._bound_progid: Optional[str] = None
+        self._last_status_cache: Dict[str, Any] = {}
+        self._last_error_class: Optional[str] = None
+        self._last_error_message: Optional[str] = None
+
+    def _set_error(self, error_class: str, message: str) -> None:
+        self._last_error_class = str(error_class)
+        self._last_error_message = str(message)
+
+    def _clear_error(self) -> None:
+        self._last_error_class = None
+        self._last_error_message = None
+
+    def _desired_major(self) -> Optional[int]:
+        return _get_target_major() or self._locked_major
+
+    def _remember_binding(self, progid: str, major: Optional[int]) -> None:
+        self._bound_progid = progid
+        if major is not None:
+            self._locked_major = int(major)
+
+    def _get_variable_direct(self, name: str) -> Any:
+        if self._doc is None:
+            raise RuntimeError("Not connected to AutoCAD")
+
+        def _op():
+            return self._doc.GetVariable(name)
+
+        return com_retry(_op)
+
+    def _read_dwg_label_direct(self) -> Optional[str]:
+        if self._doc is None:
+            return None
+        name = str(com_retry(lambda: self._doc.Name))
+        path = str(com_retry(lambda: self._doc.Path)) if getattr(self._doc, "Path", None) else ""
+        if path:
+            return os.path.join(path, name)
+        return name
+
+    def _safe_hwnd(self) -> Optional[int]:
+        if self._acad is None:
+            return None
+        try:
+            h = int(com_retry(lambda: getattr(self._acad, "HWND", 0)) or 0)
+        except Exception:
+            return None
+        return h if h > 0 else None
 
     def _get_acad_progids(self) -> Tuple[str, ...]:
         """Return ProgIDs to try, in preferred order.
@@ -178,7 +226,7 @@ class AutoCADBridge:
         and may attach to an older product even if a newer AutoCAD is running.
         """
 
-        target_major = _get_target_major()
+        target_major = self._desired_major()
 
         progids: list[str] = []
 
@@ -218,7 +266,7 @@ class AutoCADBridge:
     def connect(self, *, attach_or_launch: bool = True, visible: bool = True) -> bool:
         _com_init()
 
-        target_major = _get_target_major()
+        target_major = self._desired_major()
         allow_new = _allow_new_instance()
 
         def _attach(progid: str):
@@ -228,14 +276,18 @@ class AutoCADBridge:
             self._doc = doc
             _ = str(doc.Name)
 
-            if target_major is not None:
-                try:
-                    acadver = com_retry(lambda: doc.GetVariable("ACADVER"))
-                    major = _parse_acadver_major(acadver)
-                    if major is None or major != target_major:
-                        return False
-                except Exception:
-                    return False
+            try:
+                acadver = com_retry(lambda: doc.GetVariable("ACADVER"))
+                major = _parse_acadver_major(acadver)
+            except Exception:
+                major = None
+
+            if target_major is not None and major != target_major:
+                self._acad = None
+                self._doc = None
+                return False
+
+            self._remember_binding(progid, major)
 
             return True
 
@@ -245,6 +297,7 @@ class AutoCADBridge:
 
                 self._connected = bool(ok)
                 if self._connected:
+                    self._clear_error()
                     return True
             except Exception:
                 continue
@@ -288,13 +341,18 @@ class AutoCADBridge:
                         self._doc = doc
                         _ = str(doc.Name)
 
-                        if target_major is not None:
+                        try:
                             acadver = com_retry(lambda: doc.GetVariable("ACADVER"))
                             major = _parse_acadver_major(acadver)
-                            if major is None or major != target_major:
-                                continue
+                        except Exception:
+                            major = None
 
+                        if target_major is not None and major != target_major:
+                            continue
+
+                        self._remember_binding(progid, major)
                         self._connected = True
+                        self._clear_error()
                         return True
                     except Exception:
                         continue
@@ -334,12 +392,14 @@ class AutoCADBridge:
                             ok = com_retry(lambda: _attach(progid))
                             self._connected = bool(ok)
                             if self._connected:
+                                self._clear_error()
                                 return True
                         except Exception:
                             continue
                     time.sleep(0.5)
 
         self._connected = False
+        self._set_error("connect_failed", "Failed to connect to AutoCAD")
         return False
 
     def ensure_connection(self) -> bool:
@@ -347,10 +407,16 @@ class AutoCADBridge:
         if not self._connected or self._acad is None or self._doc is None:
             return self.connect(attach_or_launch=True)
         try:
-            _ = str(self._doc.Name)
+            _ = com_retry(lambda: str(self._doc.Name), retries=3, base_delay=0.03, max_delay=0.2)
+            self._clear_error()
             return True
-        except Exception:
+        except Exception as e:
+            if _is_callee_busy(e):
+                self._set_error("busy", str(e))
+                # AutoCAD can reject calls while UI thread is busy; treat as connected.
+                return True
             self._connected = False
+            self._set_error("disconnected", str(e))
             return self.connect(attach_or_launch=True)
 
     @property
@@ -369,36 +435,48 @@ class AutoCADBridge:
 
     def get_dwg_label(self) -> Optional[str]:
         _com_init()
+        if not self.ensure_connection():
+            return str(self._last_status_cache.get("dwg") or "") or None
         try:
-            name = str(self.doc.Name)
-            path = str(self.doc.Path) if getattr(self.doc, "Path", None) else ""
-            if path:
-                return os.path.join(path, name)
-            return name
-        except Exception:
+            return self._read_dwg_label_direct()
+        except Exception as e:
+            if _is_callee_busy(e):
+                cached = str(self._last_status_cache.get("dwg") or "")
+                return cached or None
             return None
 
     def get_variable(self, name: str) -> Any:
         _com_init()
-        def _op():
-            return self.doc.GetVariable(name)
-        return com_retry(_op)
+        if not self.ensure_connection():
+            raise RuntimeError("Not connected to AutoCAD")
+        return self._get_variable_direct(name)
 
     def set_variable(self, name: str, value: Any) -> None:
         _com_init()
+
+        if not self.ensure_connection():
+            raise RuntimeError("Not connected to AutoCAD")
+
         def _op():
-            self.doc.SetVariable(name, value)
+            if self._doc is None:
+                raise RuntimeError("Not connected to AutoCAD")
+            self._doc.SetVariable(name, value)
+
         com_retry(_op)
 
     def send_command(self, command: str) -> str:
         _com_init()
+        if not self.ensure_connection():
+            raise RuntimeError("Not connected to AutoCAD")
         cmd = command
         if not cmd.endswith("\n"):
             cmd += "\n"
         command_id = str(uuid.uuid4())
 
         def _op():
-            self.doc.SendCommand(cmd)
+            if self._doc is None:
+                raise RuntimeError("Not connected to AutoCAD")
+            self._doc.SendCommand(cmd)
             return True
 
         com_retry(_op)
@@ -439,3 +517,116 @@ class AutoCADBridge:
             return str(v) if v is not None else ""
         except Exception:
             return ""
+
+    def get_status_snapshot(self) -> Dict[str, Any]:
+        _com_init()
+        connected = self.ensure_connection()
+        source = "live"
+        stale = False
+        busy = False
+        error_class = self._last_error_class
+        error_message = self._last_error_message
+
+        if not connected:
+            if self._last_status_cache:
+                out = dict(self._last_status_cache)
+                out.update(
+                    {
+                        "connected": False,
+                        "busy": False,
+                        "stale": True,
+                        "source": "cache",
+                        "error_class": error_class or "disconnected",
+                        "error_message": error_message,
+                        "locked_major": self._locked_major,
+                        "bound_progid": self._bound_progid,
+                    }
+                )
+                return out
+            return {
+                "connected": False,
+                "busy": False,
+                "stale": True,
+                "source": "none",
+                "error_class": error_class or "disconnected",
+                "error_message": error_message,
+                "dwg": None,
+                "acadver": None,
+                "acad_hwnd": None,
+                "acad_pid": None,
+                "cmdactive": None,
+                "locked_major": self._locked_major,
+                "bound_progid": self._bound_progid,
+            }
+
+        try:
+            dwg = self._read_dwg_label_direct()
+            acadver_val = self._get_variable_direct("ACADVER")
+            acadver = str(acadver_val) if acadver_val is not None else None
+            cmdactive_val = self._get_variable_direct("CMDACTIVE")
+            try:
+                cmdactive = int(cmdactive_val)
+            except Exception:
+                cmdactive = None
+
+            hwnd = self._safe_hwnd()
+            pid = _get_hwnd_pid(hwnd) if hwnd else None
+            major = _parse_acadver_major(acadver)
+            if self._locked_major is None and major is not None:
+                self._locked_major = major
+
+            out = {
+                "connected": True,
+                "busy": False,
+                "stale": False,
+                "source": "live",
+                "error_class": None,
+                "error_message": None,
+                "dwg": dwg,
+                "acadver": acadver,
+                "acad_hwnd": hwnd,
+                "acad_pid": pid,
+                "cmdactive": cmdactive,
+                "locked_major": self._locked_major,
+                "bound_progid": self._bound_progid,
+            }
+            self._last_status_cache = dict(out)
+            return out
+        except Exception as e:
+            busy = _is_callee_busy(e)
+            error_class = "busy" if busy else "status_read_failed"
+            source = "cache" if self._last_status_cache else "none"
+            stale = True
+            self._set_error(error_class, str(e))
+
+            if self._last_status_cache:
+                out = dict(self._last_status_cache)
+                out.update(
+                    {
+                        "connected": True,
+                        "busy": busy,
+                        "stale": stale,
+                        "source": source,
+                        "error_class": error_class,
+                        "error_message": str(e),
+                        "locked_major": self._locked_major,
+                        "bound_progid": self._bound_progid,
+                    }
+                )
+                return out
+
+            return {
+                "connected": True,
+                "busy": busy,
+                "stale": stale,
+                "source": source,
+                "error_class": error_class,
+                "error_message": str(e),
+                "dwg": None,
+                "acadver": None,
+                "acad_hwnd": None,
+                "acad_pid": None,
+                "cmdactive": None,
+                "locked_major": self._locked_major,
+                "bound_progid": self._bound_progid,
+            }
