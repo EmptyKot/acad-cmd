@@ -103,7 +103,7 @@ All tools return JSON (FastMCP commonly wraps results as `{ "result": ... }`).
 
 - `get_status()`
   - returns connection info (DWG label, `ACADVER`, window handle / PID when available) and default stream details
-- `send_command(command, wait=true, timeout_sec=10, poll_interval_sec=0.1)`
+- `send_command(command, timeout_sec, wait=true, poll_interval_sec=0.1)`
   - sends raw command line text; when `wait=true` waits until AutoCAD is idle or timeout
   - if a default logfile stream is active, also returns a `log` block with new output and updated cursor
 - `get_last_output(source=lastprompt|logfile)`
@@ -117,14 +117,17 @@ All tools return JSON (FastMCP commonly wraps results as `{ "result": ... }`).
   - reads appended logfile bytes and returns `{text, new_cursor, truncated}`
 - `stop_logging(stream_id)`
   - stops a stream; best-effort disables `LOGFILEMODE` when the last server-started logfile stream is stopped
-- `load_lisp_file(path, wait=true, timeout_sec=10)`
+- `load_lisp_file(path, timeout_sec, wait=true)`
   - sends `(load "...")` (path normalized for AutoCAD)
-- `run_lisp(expr, wait=true, timeout_sec=10)`
+- `run_lisp(expr, timeout_sec, wait=true)`
   - executes an AutoLISP expression/script via `SendCommand` with start/end markers in the command history
-- `selection(timeout_sec=300, prompt=null, filter=null, max_objects=null, alert_message=null)`
+- `selection(timeout_sec, prompt=null, filter=null, max_objects=null, alert_message=null)`
   - returns currently selected objects (PickFirst); if none, prompts the user to select objects
   - when `alert_message` is provided and interactive selection is needed, shows standard AutoCAD `alert`
   - returns only `handle` + `type` for each object
+- `dict_list/dict_keys/dict_xrecord_get/dict_xrecord_set/dict_xrecord_delete/dict_delete(..., timeout_sec)`
+  - dictionary tools now require explicit `timeout_sec` as well
+  - timeout range for all waiting tools: `0.1..1800` seconds
 
 ## Troubleshooting notes
 

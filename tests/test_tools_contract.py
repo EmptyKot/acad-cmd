@@ -134,7 +134,7 @@ class ToolsContractTests(unittest.TestCase):
         fake = _make_fake_state()
         with _patched_state(fake):
             with patch("acad_cmd.tools._run_lisp_json", return_value={"ok": True, "dicts": [{"name": "X"}]}) as run_json:
-                res = tools.dict_list(None)
+                res = tools.dict_list(None, timeout_sec=3.0)
 
         self.assertEqual(res, {"dicts": [{"name": "X"}]})
         expr = run_json.call_args.args[1]
@@ -152,6 +152,7 @@ class ToolsContractTests(unittest.TestCase):
                         {"code": 1, "value": "abc"},
                         {"code": 90, "value": 42},
                     ],
+                    timeout_sec=3.0,
                     overwrite=False,
                 )
 
@@ -168,9 +169,19 @@ class ToolsContractTests(unittest.TestCase):
         fake = _make_fake_state()
         with _patched_state(fake):
             with self.assertRaisesRegex(ValueError, "dict_name must be non-empty"):
-                tools.dict_keys(None, dict_name="")
+                tools.dict_keys(None, dict_name="", timeout_sec=3.0)
             with self.assertRaisesRegex(ValueError, "key must be non-empty"):
-                tools.dict_xrecord_get(None, dict_name="A", key="")
+                tools.dict_xrecord_get(None, dict_name="A", key="", timeout_sec=3.0)
+
+    def test_timeout_validation(self) -> None:
+        fake = _make_fake_state()
+        with _patched_state(fake):
+            with self.assertRaisesRegex(ValueError, "timeout_sec must be in range"):
+                tools.send_command(None, command="._LINE", timeout_sec=0.0, wait=True)
+            with self.assertRaisesRegex(ValueError, "poll_interval_sec must be in range"):
+                tools.send_command(None, command="._LINE", timeout_sec=1.0, wait=True, poll_interval_sec=10.0)
+            with self.assertRaisesRegex(ValueError, "timeout_sec must be in range"):
+                tools.dict_list(None, timeout_sec=2000.0)
 
     def test_selection_contract_implied_pickfirst(self) -> None:
         fake = _make_fake_state()

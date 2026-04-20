@@ -23,6 +23,10 @@ from .selection import collect_selection_stream_lite as _collect_selection_strea
 
 
 DEFAULT_LOG_DIR = os.path.join(os.getcwd(), "logs", "acad-cmd")
+MIN_TIMEOUT_SEC = 0.1
+MAX_TIMEOUT_SEC = 1800.0
+MIN_POLL_INTERVAL_SEC = 0.01
+MAX_POLL_INTERVAL_SEC = 5.0
 
 
 @dataclass
@@ -60,9 +64,36 @@ def _ensure_logfile_stream(ctx: Context) -> Optional[str]:
     return str(r.get("stream_id"))
 
 
-def _run_lisp_json(ctx: Context, expr: str, *, timeout_sec: float = 10.0) -> Dict[str, Any]:
+def _normalize_timeout_sec(timeout_sec: Any) -> float:
+    try:
+        value = float(timeout_sec)
+    except Exception as exc:
+        raise ValueError(
+            f"timeout_sec must be a number in range [{MIN_TIMEOUT_SEC}, {MAX_TIMEOUT_SEC}]"
+        ) from exc
+    if value < MIN_TIMEOUT_SEC or value > MAX_TIMEOUT_SEC:
+        raise ValueError(f"timeout_sec must be in range [{MIN_TIMEOUT_SEC}, {MAX_TIMEOUT_SEC}]")
+    return value
+
+
+def _normalize_poll_interval_sec(poll_interval_sec: Any) -> float:
+    try:
+        value = float(poll_interval_sec)
+    except Exception as exc:
+        raise ValueError(
+            f"poll_interval_sec must be a number in range [{MIN_POLL_INTERVAL_SEC}, {MAX_POLL_INTERVAL_SEC}]"
+        ) from exc
+    if value < MIN_POLL_INTERVAL_SEC or value > MAX_POLL_INTERVAL_SEC:
+        raise ValueError(
+            f"poll_interval_sec must be in range [{MIN_POLL_INTERVAL_SEC}, {MAX_POLL_INTERVAL_SEC}]"
+        )
+    return value
+
+
+def _run_lisp_json(ctx: Context, expr: str, *, timeout_sec: float) -> Dict[str, Any]:
     """Run a LISP expr that prints one [MCP:JSON]{...} line."""
 
+    timeout_sec = _normalize_timeout_sec(timeout_sec)
     temp_stream_id = _ensure_logfile_stream(ctx)
     try:
         r = run_lisp(ctx, expr, wait=True, timeout_sec=timeout_sec)
@@ -309,11 +340,13 @@ def get_last_output(ctx: Context, source: str = "lastprompt") -> Dict[str, Any]:
 def send_command(
     ctx: Context,
     command: str,
+    timeout_sec: float,
     wait: bool = True,
-    timeout_sec: float = 10.0,
     poll_interval_sec: float = 0.1,
 ) -> Dict[str, Any]:
     _ensure_connected()
+    timeout_sec = _normalize_timeout_sec(timeout_sec)
+    poll_interval_sec = _normalize_poll_interval_sec(poll_interval_sec)
     dwg = state.bridge.get_dwg_label()
     command_id = state.bridge.send_command(command)
 
@@ -372,8 +405,8 @@ def send_command(
 def load_lisp_file(
     ctx: Context,
     path: str,
+    timeout_sec: float,
     wait: bool = True,
-    timeout_sec: float = 10.0,
 ) -> Dict[str, Any]:
     _ensure_connected()
     dwg = state.bridge.get_dwg_label()
@@ -386,8 +419,8 @@ def load_lisp_file(
 def run_lisp(
     ctx: Context,
     expr: str,
+    timeout_sec: float,
     wait: bool = True,
-    timeout_sec: float = 10.0,
 ) -> Dict[str, Any]:
     _ensure_connected()
     dwg = state.bridge.get_dwg_label()
@@ -400,29 +433,29 @@ def run_lisp(
 
 
 @mcp.tool()
-def dict_list(ctx: Context) -> Dict[str, Any]:
+def dict_list(ctx: Context, timeout_sec: float) -> Dict[str, Any]:
     """List top-level dictionaries from Named Objects Dictionary."""
 
     _ensure_connected()
     expr = _lisp_concat(_MCP_DICT_LISP_LIB, "(mcp-dict-list)\n")
-    obj = _run_lisp_json(ctx, expr)
+    obj = _run_lisp_json(ctx, expr, timeout_sec=timeout_sec)
     return _strip_ok(obj)
 
 
 @mcp.tool()
-def dict_keys(ctx: Context, dict_name: str) -> Dict[str, Any]:
+def dict_keys(ctx: Context, dict_name: str, timeout_sec: float) -> Dict[str, Any]:
     """List keys (and entry types) in a named dictionary."""
 
     _ensure_connected()
     if not dict_name:
         raise ValueError("dict_name must be non-empty")
     expr = _lisp_concat(_MCP_DICT_LISP_LIB, f"(mcp-dict-keys {_lisp_string(dict_name)})\n")
-    obj = _run_lisp_json(ctx, expr)
+    obj = _run_lisp_json(ctx, expr, timeout_sec=timeout_sec)
     return _strip_ok(obj)
 
 
 @mcp.tool()
-def dict_xrecord_get(ctx: Context, dict_name: str, key: str) -> Dict[str, Any]:
+def dict_xrecord_get(ctx: Context, dict_name: str, key: str, timeout_sec: float) -> Dict[str, Any]:
     """Read XRecord data from a named dictionary by key."""
 
     _ensure_connected()
@@ -434,7 +467,7 @@ def dict_xrecord_get(ctx: Context, dict_name: str, key: str) -> Dict[str, Any]:
         _MCP_DICT_LISP_LIB,
         f"(mcp-xrecord-get {_lisp_string(dict_name)} {_lisp_string(key)})\n",
     )
-    obj = _run_lisp_json(ctx, expr)
+    obj = _run_lisp_json(ctx, expr, timeout_sec=timeout_sec)
     return _strip_ok(obj)
 
 
@@ -444,6 +477,7 @@ def dict_xrecord_set(
     dict_name: str,
     key: str,
     values: Any,
+    timeout_sec: float,
     overwrite: bool = True,
 ) -> Dict[str, Any]:
     """Write XRecord data into a named dictionary under key."""
@@ -459,12 +493,12 @@ def dict_xrecord_set(
         _MCP_DICT_LISP_LIB,
         f"(mcp-xrecord-set {_lisp_string(dict_name)} {_lisp_string(key)} {values_expr} {ow})\n",
     )
-    obj = _run_lisp_json(ctx, expr)
+    obj = _run_lisp_json(ctx, expr, timeout_sec=timeout_sec)
     return _strip_ok(obj)
 
 
 @mcp.tool()
-def dict_xrecord_delete(ctx: Context, dict_name: str, key: str) -> Dict[str, Any]:
+def dict_xrecord_delete(ctx: Context, dict_name: str, key: str, timeout_sec: float) -> Dict[str, Any]:
     """Delete an XRecord entry from a named dictionary."""
 
     _ensure_connected()
@@ -476,12 +510,12 @@ def dict_xrecord_delete(ctx: Context, dict_name: str, key: str) -> Dict[str, Any
         _MCP_DICT_LISP_LIB,
         f"(mcp-xrecord-delete {_lisp_string(dict_name)} {_lisp_string(key)})\n",
     )
-    obj = _run_lisp_json(ctx, expr)
+    obj = _run_lisp_json(ctx, expr, timeout_sec=timeout_sec)
     return _strip_ok(obj)
 
 
 @mcp.tool()
-def dict_delete(ctx: Context, dict_name: str, recursive: bool = True) -> Dict[str, Any]:
+def dict_delete(ctx: Context, dict_name: str, timeout_sec: float, recursive: bool = True) -> Dict[str, Any]:
     """Delete a named dictionary from the Named Objects Dictionary."""
 
     _ensure_connected()
@@ -489,14 +523,14 @@ def dict_delete(ctx: Context, dict_name: str, recursive: bool = True) -> Dict[st
         raise ValueError("dict_name must be non-empty")
     rec = "T" if recursive else "nil"
     expr = _lisp_concat(_MCP_DICT_LISP_LIB, f"(mcp-dict-delete {_lisp_string(dict_name)} {rec})\n")
-    obj = _run_lisp_json(ctx, expr)
+    obj = _run_lisp_json(ctx, expr, timeout_sec=timeout_sec)
     return _strip_ok(obj)
 
 
 @mcp.tool()
 def selection(
     ctx: Context,
-    timeout_sec: float = 300.0,
+    timeout_sec: float,
     prompt: Optional[str] = None,
     filter: Any = None,
     max_objects: Optional[int] = None,
@@ -508,6 +542,7 @@ def selection(
     """
 
     _ensure_connected()
+    timeout_sec = _normalize_timeout_sec(timeout_sec)
     dwg = state.bridge.get_dwg_label()
 
     temp_stream_id = _ensure_logfile_stream(ctx)
@@ -525,7 +560,7 @@ def selection(
             _MCP_SELECTION_LISP_LIB,
             f"(mcp-selection-implied-lite {_lisp_string(req_id1)} {mo})\n",
         )
-        r1 = send_command(ctx, expr1, wait=True, timeout_sec=min(10.0, float(timeout_sec)))
+        r1 = send_command(ctx, expr1, wait=True, timeout_sec=timeout_sec)
         log_block1 = r1.get("log") or {}
         initial_text1 = str(log_block1.get("text") or "")
         cursor1 = log_block1.get("cursor")
@@ -533,7 +568,7 @@ def selection(
             streams=state.streams,
             stream_id=stream.stream_id,
             req_id=req_id1,
-            timeout_sec=min(10.0, float(timeout_sec)),
+            timeout_sec=timeout_sec,
             initial_text=initial_text1,
             cursor=int(cursor1) if cursor1 is not None else cursor0,
         )
@@ -580,7 +615,7 @@ def selection(
             streams=state.streams,
             stream_id=stream.stream_id,
             req_id=req_id2,
-            timeout_sec=float(timeout_sec),
+            timeout_sec=timeout_sec,
             initial_text=initial_text2,
             cursor=int(cursor2) if cursor2 is not None else int(out1.get("cursor") or stream.cursor),
         )

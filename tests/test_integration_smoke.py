@@ -83,7 +83,13 @@ async def _run_smoke() -> None:
                 with anyio.fail_after(30):
                     r_set = await session.call_tool(
                         "dict_xrecord_set",
-                        {"dict_name": dict_name, "key": key, "values": values, "overwrite": True},
+                        {
+                            "dict_name": dict_name,
+                            "key": key,
+                            "values": values,
+                            "timeout_sec": 10.0,
+                            "overwrite": True,
+                        },
                     )
                 if r_set.isError:
                     raise AssertionError(f"dict_xrecord_set error: {r_set.content}")
@@ -92,7 +98,10 @@ async def _run_smoke() -> None:
                     raise AssertionError(f"dict_xrecord_set unexpected payload: {p_set!r}")
 
                 with anyio.fail_after(30):
-                    r_get = await session.call_tool("dict_xrecord_get", {"dict_name": dict_name, "key": key})
+                    r_get = await session.call_tool(
+                        "dict_xrecord_get",
+                        {"dict_name": dict_name, "key": key, "timeout_sec": 10.0},
+                    )
                 if r_get.isError:
                     raise AssertionError(f"dict_xrecord_get error: {r_get.content}")
                 p_get = _unwrap_result(r_get)

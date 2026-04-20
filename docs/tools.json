@@ -7,10 +7,10 @@
         "properties": {
           "command": {"type": "string"},
           "wait": {"type": "boolean", "default": true},
-          "timeout_sec": {"type": "number", "default": 10},
-          "poll_interval_sec": {"type": "number", "default": 0.1}
+          "timeout_sec": {"type": "number", "minimum": 0.1, "maximum": 1800},
+          "poll_interval_sec": {"type": "number", "minimum": 0.01, "maximum": 5.0, "default": 0.1}
         },
-        "required": ["command"]
+        "required": ["command", "timeout_sec"]
       }
     },
     {
@@ -20,9 +20,9 @@
         "properties": {
           "expr": {"type": "string"},
           "wait": {"type": "boolean", "default": true},
-          "timeout_sec": {"type": "number", "default": 10}
+          "timeout_sec": {"type": "number", "minimum": 0.1, "maximum": 1800}
         },
-        "required": ["expr"]
+        "required": ["expr", "timeout_sec"]
       }
     },
     {
@@ -32,9 +32,9 @@
         "properties": {
           "path": {"type": "string"},
           "wait": {"type": "boolean", "default": true},
-          "timeout_sec": {"type": "number", "default": 10}
+          "timeout_sec": {"type": "number", "minimum": 0.1, "maximum": 1800}
         },
-        "required": ["path"]
+        "required": ["path", "timeout_sec"]
       }
     },
     {
@@ -101,8 +101,10 @@
       "name": "dict_list",
       "inputSchema": {
         "type": "object",
-        "properties": {},
-        "required": []
+        "properties": {
+          "timeout_sec": {"type": "number", "minimum": 0.1, "maximum": 1800}
+        },
+        "required": ["timeout_sec"]
       }
     },
     {
@@ -111,9 +113,10 @@
         "type": "object",
         "properties": {
           "dict_name": {"type": "string"},
-          "key": {"type": "string"}
+          "key": {"type": "string"},
+          "timeout_sec": {"type": "number", "minimum": 0.1, "maximum": 1800}
         },
-        "required": ["dict_name", "key"]
+        "required": ["dict_name", "key", "timeout_sec"]
       }
     },
     {
@@ -121,9 +124,10 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "dict_name": {"type": "string"}
+          "dict_name": {"type": "string"},
+          "timeout_sec": {"type": "number", "minimum": 0.1, "maximum": 1800}
         },
-        "required": ["dict_name"]
+        "required": ["dict_name", "timeout_sec"]
       }
     },
     {
@@ -144,9 +148,10 @@
               "required": ["code", "value"]
             }
           },
+          "timeout_sec": {"type": "number", "minimum": 0.1, "maximum": 1800},
           "overwrite": {"type": "boolean", "default": true}
         },
-        "required": ["dict_name", "key", "values"]
+        "required": ["dict_name", "key", "values", "timeout_sec"]
       }
     },
     {
@@ -155,9 +160,10 @@
         "type": "object",
         "properties": {
           "dict_name": {"type": "string"},
-          "key": {"type": "string"}
+          "key": {"type": "string"},
+          "timeout_sec": {"type": "number", "minimum": 0.1, "maximum": 1800}
         },
-        "required": ["dict_name", "key"]
+        "required": ["dict_name", "key", "timeout_sec"]
       }
     },
     {
@@ -166,9 +172,10 @@
         "type": "object",
         "properties": {
           "dict_name": {"type": "string"},
+          "timeout_sec": {"type": "number", "minimum": 0.1, "maximum": 1800},
           "recursive": {"type": "boolean", "default": true}
         },
-        "required": ["dict_name"]
+        "required": ["dict_name", "timeout_sec"]
       }
     },
     {
@@ -176,7 +183,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "timeout_sec": {"type": "number", "default": 300},
+          "timeout_sec": {"type": "number", "minimum": 0.1, "maximum": 1800},
           "prompt": {"type": ["string", "null"], "default": null},
           "filter": {
             "type": ["array", "null"],
@@ -192,7 +199,7 @@
           },
           "max_objects": {"type": ["integer", "null"], "default": null}
         },
-        "required": []
+        "required": ["timeout_sec"]
       }
     }
   ]
