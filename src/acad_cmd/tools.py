@@ -213,6 +213,49 @@ def get_status(ctx: Context) -> Dict[str, Any]:
 
 
 @mcp.tool()
+def open_drawing(
+    ctx: Context,
+    path: str,
+    timeout_sec: float,
+    read_only: bool = False,
+) -> Dict[str, Any]:
+    _ensure_connected()
+    timeout_sec = _normalize_timeout_sec(timeout_sec)
+    dwg_before = state.bridge.get_dwg_label()
+
+    opened = state.bridge.open_drawing(path=path, timeout_sec=timeout_sec, read_only=read_only)
+    dwg_after = state.bridge.get_dwg_label()
+    _ensure_logfile_stream(ctx)
+
+    result = {
+        "path": opened.get("path"),
+        "dwg_before": dwg_before,
+        "dwg": dwg_after,
+        "dwg_opened": opened.get("dwg"),
+        "already_open": bool(opened.get("already_open")),
+        "opened": bool(opened.get("opened")),
+        "activated": bool(opened.get("activated")),
+        "read_only": bool(opened.get("read_only")),
+        "timeout_sec": timeout_sec,
+    }
+    state.audit.log(
+        "open_drawing",
+        {
+            "path": result["path"],
+            "dwg_before": dwg_before,
+            "dwg_after": dwg_after,
+            "already_open": result["already_open"],
+            "opened": result["opened"],
+            "activated": result["activated"],
+            "read_only": result["read_only"],
+            "timeout_sec": timeout_sec,
+        },
+        dwg=dwg_after,
+    )
+    return result
+
+
+@mcp.tool()
 def start_logging(
     ctx: Context,
     mode: str = "logfile",

@@ -49,7 +49,7 @@ async def _run_smoke() -> None:
             with anyio.fail_after(30):
                 listed = await session.list_tools()
             names = {t.name for t in listed.tools}
-            for required in ("get_status", "dict_list", "dict_xrecord_set", "dict_xrecord_get", "selection"):
+            for required in ("get_status", "open_drawing", "dict_list", "dict_xrecord_set", "dict_xrecord_get", "selection"):
                 if required not in names:
                     raise AssertionError(f"Missing tool: {required}")
 

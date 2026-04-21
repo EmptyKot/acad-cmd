@@ -98,6 +98,18 @@
       }
     },
     {
+      "name": "open_drawing",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string"},
+          "timeout_sec": {"type": "number", "minimum": 0.1, "maximum": 1800},
+          "read_only": {"type": "boolean", "default": false}
+        },
+        "required": ["path", "timeout_sec"]
+      }
+    },
+    {
       "name": "dict_list",
       "inputSchema": {
         "type": "object",

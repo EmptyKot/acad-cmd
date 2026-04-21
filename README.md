@@ -5,6 +5,7 @@ Local MCP server (stdio / JSON-RPC) that connects to AutoCAD on Windows via COM 
 What it does:
 
 - send text to the AutoCAD command line (`SendCommand`)
+- open DWG files and switch active AutoCAD context to the opened drawing
 - use persistent full command history logging via AutoCAD `LOGFILEMODE` / `LOGFILENAME` (primary output source)
 - optionally read `LASTPROMPT` for legacy compatibility
 - write an audit log (JSONL) for every tool call
@@ -108,6 +109,9 @@ All tools return JSON (FastMCP commonly wraps results as `{ "result": ... }`).
 - `send_command(command, timeout_sec, wait=true, poll_interval_sec=0.1)`
   - sends raw command line text; when `wait=true` waits until AutoCAD is idle or timeout
   - ensures a default logfile stream and returns a `log` block with new output and updated cursor
+- `open_drawing(path, timeout_sec, read_only=false)`
+  - opens a DWG and guarantees active context switch to the target document (or errors on timeout)
+  - returns `dwg_before`, `dwg`, `already_open`, `opened`, `activated`
 - `get_last_output(source=lastprompt|logfile)`
   - default source is `logfile`
   - `logfile`: returns a tail of the current default logfile stream (auto-starts logfile stream if needed)

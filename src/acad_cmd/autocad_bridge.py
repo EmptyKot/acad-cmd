@@ -38,6 +38,10 @@ def _com_init() -> None:
 _ACADVER_RE = re.compile(r"(?P<major>\d+)\.(?P<minor>\d+)")
 
 
+def _normalize_fs_path(path: str) -> str:
+    return os.path.normcase(os.path.abspath(os.path.normpath(path)))
+
+
 def _parse_acadver_major(v: Any) -> Optional[int]:
     """Extract major version from AutoCAD ACADVER value.
 
@@ -200,8 +204,13 @@ class AutoCADBridge:
     def _read_dwg_label_direct(self) -> Optional[str]:
         if self._doc is None:
             return None
-        name = str(com_retry(lambda: self._doc.Name))
-        path = str(com_retry(lambda: self._doc.Path)) if getattr(self._doc, "Path", None) else ""
+        return self._doc_dwg_label(self._doc)
+
+    def _doc_dwg_label(self, doc: Any) -> Optional[str]:
+        if doc is None:
+            return None
+        name = str(com_retry(lambda: doc.Name))
+        path = str(com_retry(lambda: doc.Path)) if getattr(doc, "Path", None) else ""
         if path:
             return os.path.join(path, name)
         return name
@@ -481,6 +490,110 @@ class AutoCADBridge:
 
         com_retry(_op)
         return command_id
+
+    def open_drawing(
+        self,
+        path: str,
+        *,
+        timeout_sec: float = 30.0,
+        poll_interval_sec: float = 0.2,
+        read_only: bool = False,
+    ) -> Dict[str, Any]:
+        _com_init()
+        if not path or not str(path).strip():
+            raise ValueError("path must be non-empty")
+        if timeout_sec <= 0:
+            raise ValueError("timeout_sec must be > 0")
+        if poll_interval_sec <= 0:
+            raise ValueError("poll_interval_sec must be > 0")
+
+        target_path = _normalize_fs_path(os.path.expandvars(os.path.expanduser(str(path))))
+        if not os.path.isfile(target_path):
+            raise FileNotFoundError(f"Drawing file not found: {target_path}")
+
+        if not self.ensure_connection():
+            raise RuntimeError("Not connected to AutoCAD")
+        if self._acad is None:
+            raise RuntimeError("Not connected to AutoCAD")
+
+        existing = None
+        already_open = False
+        opened_now = False
+
+        def _list_docs():
+            if self._acad is None:
+                return []
+            return [doc for doc in self._acad.Documents]
+
+        for doc in com_retry(_list_docs):
+            try:
+                label = self._doc_dwg_label(doc)
+            except Exception:
+                continue
+            if label and _normalize_fs_path(label) == target_path:
+                existing = doc
+                already_open = True
+                break
+
+        if existing is None:
+            def _open():
+                if self._acad is None:
+                    raise RuntimeError("Not connected to AutoCAD")
+                docs = self._acad.Documents
+                if read_only:
+                    return docs.Open(target_path, True)
+                return docs.Open(target_path)
+
+            existing = com_retry(_open)
+            opened_now = True
+
+        def _activate():
+            if existing is None:
+                raise RuntimeError("Internal error: document handle missing")
+            existing.Activate()
+            return True
+
+        com_retry(_activate)
+
+        t0 = time.time()
+        last_active = None
+        activated = False
+
+        while True:
+            active_doc = com_retry(lambda: self._acad.ActiveDocument)
+            self._doc = active_doc
+            last_active = self._doc_dwg_label(active_doc)
+
+            if last_active and _normalize_fs_path(last_active) == target_path:
+                activated = True
+                break
+
+            if time.time() - t0 >= timeout_sec:
+                break
+
+            try:
+                com_retry(_activate, retries=3, base_delay=0.02, max_delay=0.15)
+            except Exception:
+                pass
+            time.sleep(poll_interval_sec)
+
+        if not activated:
+            msg = (
+                f"Failed to activate opened drawing within {timeout_sec:.1f}s. "
+                f"target='{target_path}', active='{last_active}'"
+            )
+            self._set_error("open_drawing_activate_failed", msg)
+            raise RuntimeError(msg)
+
+        self._clear_error()
+        return {
+            "path": target_path,
+            "dwg": last_active,
+            "already_open": already_open,
+            "opened": opened_now,
+            "activated": True,
+            "read_only": bool(read_only),
+        }
 
     def wait_for_idle(self, timeout_sec: float, poll_interval_sec: float = 0.1) -> WaitResult:
         _com_init()

@@ -29,6 +29,7 @@ class _FakeBridge:
     def __init__(self) -> None:
         self.acad = SimpleNamespace(HWND=0)
         self.last_sent = None
+        self._dwg = "D:/tmp/Test1.dwg"
         self._status_snapshot = {
             "connected": True,
             "busy": False,
@@ -36,7 +37,7 @@ class _FakeBridge:
             "source": "live",
             "error_class": None,
             "error_message": None,
-            "dwg": "D:/tmp/Test1.dwg",
+            "dwg": self._dwg,
             "acadver": "24.0s (LMS Tech)",
             "acad_hwnd": 0,
             "acad_pid": None,
@@ -49,10 +50,12 @@ class _FakeBridge:
         return True
 
     def get_status_snapshot(self):
-        return dict(self._status_snapshot)
+        out = dict(self._status_snapshot)
+        out["dwg"] = self._dwg
+        return out
 
     def get_dwg_label(self):
-        return "D:/tmp/Test1.dwg"
+        return self._dwg
 
     def get_variable(self, name: str):
         if name == "ACADVER":
@@ -70,6 +73,18 @@ class _FakeBridge:
 
     def get_last_prompt(self) -> str:
         return "Command:"
+
+    def open_drawing(self, path: str, *, timeout_sec: float = 30.0, read_only: bool = False):
+        norm = path.replace("\\", "/")
+        self._dwg = norm
+        return {
+            "path": norm,
+            "dwg": norm,
+            "already_open": False,
+            "opened": True,
+            "activated": True,
+            "read_only": bool(read_only),
+        }
 
 
 class _FakeStreams:
@@ -154,6 +169,23 @@ class ToolsContractTests(unittest.TestCase):
         logged_names = [e[0] for e in fake.audit.events]
         self.assertIn("send_command", logged_names)
         self.assertIn("send_command_result", logged_names)
+
+    def test_open_drawing_contract(self) -> None:
+        fake = _make_fake_state()
+        with _patched_state(fake):
+            res = tools.open_drawing(None, path="D:/tmp/NewProject.dwg", timeout_sec=5.0, read_only=True)
+
+        self.assertEqual(res["path"], "D:/tmp/NewProject.dwg")
+        self.assertEqual(res["dwg_before"], "D:/tmp/Test1.dwg")
+        self.assertEqual(res["dwg"], "D:/tmp/NewProject.dwg")
+        self.assertEqual(res["dwg_opened"], "D:/tmp/NewProject.dwg")
+        self.assertEqual(res["opened"], True)
+        self.assertEqual(res["already_open"], False)
+        self.assertEqual(res["activated"], True)
+        self.assertEqual(res["read_only"], True)
+
+        logged_names = [e[0] for e in fake.audit.events]
+        self.assertIn("open_drawing", logged_names)
 
     def test_get_last_output_defaults_to_logfile(self) -> None:
         fake = _make_fake_state()
