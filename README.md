@@ -5,8 +5,8 @@ Local MCP server (stdio / JSON-RPC) that connects to AutoCAD on Windows via COM 
 What it does:
 
 - send text to the AutoCAD command line (`SendCommand`)
-- read output via `LASTPROMPT` (low overhead)
-- stream full command history via AutoCAD `LOGFILEMODE` / `LOGFILENAME`
+- use persistent full command history logging via AutoCAD `LOGFILEMODE` / `LOGFILENAME` (primary output source)
+- optionally read `LASTPROMPT` for legacy compatibility
 - write an audit log (JSONL) for every tool call
 
 ## Requirements
@@ -107,13 +107,15 @@ All tools return JSON (FastMCP commonly wraps results as `{ "result": ... }`).
   - includes binding info to avoid cross-version drift: `locked_major`, `bound_progid`
 - `send_command(command, timeout_sec, wait=true, poll_interval_sec=0.1)`
   - sends raw command line text; when `wait=true` waits until AutoCAD is idle or timeout
-  - if a default logfile stream is active, also returns a `log` block with new output and updated cursor
+  - ensures a default logfile stream and returns a `log` block with new output and updated cursor
 - `get_last_output(source=lastprompt|logfile)`
-  - `lastprompt`: reads `LASTPROMPT`
-  - `logfile`: returns a tail of the current default logfile stream
+  - default source is `logfile`
+  - `logfile`: returns a tail of the current default logfile stream (auto-starts logfile stream if needed)
+  - `lastprompt`: reads `LASTPROMPT` (legacy/fallback source)
 - `start_logging(mode=logfile|lastprompt, logfile_path=null, reset=false)`
   - starts a stream and returns `{stream_id, cursor, ...}`
   - `logfile` mode enables `LOGFILEMODE` and tracks `LOGFILENAME`
+  - `lastprompt` mode is kept only for backward compatibility
   - if `logfile_path` is not provided, the server prefers AutoCAD's current `LOGFILENAME` to avoid path issues
 - `get_new_output_since(stream_id, cursor, max_bytes=65536)`
   - reads appended logfile bytes and returns `{text, new_cursor, truncated}`

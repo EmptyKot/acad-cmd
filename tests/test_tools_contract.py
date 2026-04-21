@@ -93,6 +93,9 @@ class _FakeStreams:
     def read_new(self, stream_id: str, cursor: int, max_bytes: int):
         return "line-1", 106, False
 
+    def read_tail(self, stream_id: str, tail_bytes: int = 8192):
+        return "tail-1"
+
 
 @contextmanager
 def _patched_state(temp_state):
@@ -151,6 +154,24 @@ class ToolsContractTests(unittest.TestCase):
         logged_names = [e[0] for e in fake.audit.events]
         self.assertIn("send_command", logged_names)
         self.assertIn("send_command_result", logged_names)
+
+    def test_get_last_output_defaults_to_logfile(self) -> None:
+        fake = _make_fake_state()
+        with _patched_state(fake):
+            res = tools.get_last_output(None)
+
+        self.assertEqual(res["source"], "logfile")
+        self.assertEqual(res["text"], "tail-1")
+        self.assertEqual(res["dwg"], "D:/tmp/Test1.dwg")
+
+    def test_get_last_output_lastprompt_legacy_source(self) -> None:
+        fake = _make_fake_state()
+        with _patched_state(fake):
+            res = tools.get_last_output(None, source="lastprompt")
+
+        self.assertEqual(res["source"], "lastprompt")
+        self.assertEqual(res["text"], "Command:")
+        self.assertEqual(res["dwg"], "D:/tmp/Test1.dwg")
 
     def test_dict_list_contract_and_expression(self) -> None:
         fake = _make_fake_state()

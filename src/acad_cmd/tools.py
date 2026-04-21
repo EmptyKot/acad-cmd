@@ -54,14 +54,13 @@ state = _make_state()
 mcp = FastMCP("acad-cmd")
 
 
-def _ensure_logfile_stream(ctx: Context) -> Optional[str]:
-    """Ensure default output stream is a logfile stream; return temp stream_id if created."""
+def _ensure_logfile_stream(ctx: Context) -> None:
+    """Ensure default output stream is a logfile stream."""
 
     s = state.streams.get_default()
     if s and s.mode == "logfile" and s.logfile_path:
-        return None
-    r = start_logging(ctx, mode="logfile")
-    return str(r.get("stream_id"))
+        return
+    start_logging(ctx, mode="logfile")
 
 
 def _normalize_timeout_sec(timeout_sec: Any) -> float:
@@ -94,28 +93,20 @@ def _run_lisp_json(ctx: Context, expr: str, *, timeout_sec: float) -> Dict[str, 
     """Run a LISP expr that prints one [MCP:JSON]{...} line."""
 
     timeout_sec = _normalize_timeout_sec(timeout_sec)
-    temp_stream_id = _ensure_logfile_stream(ctx)
+    r = run_lisp(ctx, expr, wait=True, timeout_sec=timeout_sec)
+    log_block = r.get("log") or {}
+    text = str(log_block.get("text") or "")
     try:
-        r = run_lisp(ctx, expr, wait=True, timeout_sec=timeout_sec)
-        log_block = r.get("log") or {}
-        text = str(log_block.get("text") or "")
-        try:
-            obj = _extract_mcp_json(text)
-        except Exception:
-            # Fallback: sometimes the logfile chunk returned by send_command()
-            # does not include the marker yet. Try the logfile tail.
-            tail = get_last_output(ctx, source="logfile")
-            obj = _extract_mcp_json(str(tail.get("text") or ""))
-        if obj.get("ok") is False:
-            msg = obj.get("error") or "Unknown AutoLISP error"
-            raise RuntimeError(str(msg))
-        return obj
-    finally:
-        if temp_stream_id:
-            try:
-                stop_logging(ctx, temp_stream_id)
-            except Exception:
-                pass
+        obj = _extract_mcp_json(text)
+    except Exception:
+        # Fallback: sometimes the logfile chunk returned by send_command()
+        # does not include the marker yet. Try the logfile tail.
+        tail = get_last_output(ctx, source="logfile")
+        obj = _extract_mcp_json(str(tail.get("text") or ""))
+    if obj.get("ok") is False:
+        msg = obj.get("error") or "Unknown AutoLISP error"
+        raise RuntimeError(str(msg))
+    return obj
 
 
 def _ensure_connected() -> None:
@@ -357,11 +348,15 @@ def get_new_output_since(
 
 
 @mcp.tool()
-def get_last_output(ctx: Context, source: str = "lastprompt") -> Dict[str, Any]:
+def get_last_output(ctx: Context, source: str = "logfile") -> Dict[str, Any]:
     _ensure_connected()
     dwg = state.bridge.get_dwg_label()
 
+    if source not in ("logfile", "lastprompt"):
+        raise ValueError("source must be 'logfile' or 'lastprompt'")
+
     if source == "logfile":
+        _ensure_logfile_stream(ctx)
         s = state.streams.get_default()
         if not s:
             return {"dwg": dwg, "text": "", "timestamp": iso_now(), "source": source}
@@ -383,6 +378,7 @@ def send_command(
     poll_interval_sec: float = 0.1,
 ) -> Dict[str, Any]:
     _ensure_connected()
+    _ensure_logfile_stream(ctx)
     timeout_sec = _normalize_timeout_sec(timeout_sec)
     poll_interval_sec = _normalize_poll_interval_sec(poll_interval_sec)
     dwg = state.bridge.get_dwg_label()
@@ -580,106 +576,99 @@ def selection(
     """
 
     _ensure_connected()
+    _ensure_logfile_stream(ctx)
     timeout_sec = _normalize_timeout_sec(timeout_sec)
     dwg = state.bridge.get_dwg_label()
 
-    temp_stream_id = _ensure_logfile_stream(ctx)
+    stream = state.streams.get_default()
+    if not stream:
+        raise RuntimeError("No default stream")
+
+    mo = int(max_objects) if max_objects is not None else -1
+
+    # 1) Try implied (PickFirst) selection.
+    req_id1 = str(uuid.uuid4())
+    cursor0 = int(stream.cursor)
+    expr1 = _lisp_concat(
+        _MCP_SELECTION_LISP_LIB,
+        f"(mcp-selection-implied-lite {_lisp_string(req_id1)} {mo})\n",
+    )
+    r1 = send_command(ctx, expr1, wait=True, timeout_sec=timeout_sec)
+    log_block1 = r1.get("log") or {}
+    initial_text1 = str(log_block1.get("text") or "")
+    cursor1 = log_block1.get("cursor")
+    out1 = _collect_selection_stream_lite(
+        streams=state.streams,
+        stream_id=stream.stream_id,
+        req_id=req_id1,
+        timeout_sec=timeout_sec,
+        initial_text=initial_text1,
+        cursor=int(cursor1) if cursor1 is not None else cursor0,
+    )
+    out1["dwg"] = dwg
+    state.audit.log(
+        "selection",
+        {
+            "phase": "implied",
+            "req_id": req_id1,
+            "max_objects": max_objects,
+            "count": out1.get("count"),
+            "timed_out": out1.get("timed_out"),
+        },
+        dwg=dwg,
+    )
+
+    if not out1.get("timed_out") and int(out1.get("count") or 0) > 0:
+        return out1
+
+    # 2) If nothing selected, prompt interactively.
     try:
-        stream = state.streams.get_default()
-        if not stream:
-            raise RuntimeError("No default stream")
+        cmdactive = int(state.bridge.get_variable("CMDACTIVE") or 0)
+    except Exception:
+        cmdactive = 0
+    if cmdactive != 0:
+        raise RuntimeError(f"AutoCAD is busy (CMDACTIVE={cmdactive}); cannot prompt for selection")
 
-        mo = int(max_objects) if max_objects is not None else -1
+    req_id2 = str(uuid.uuid4())
+    prompt_expr = _lisp_string(prompt) if prompt else "nil"
+    alert_expr = _lisp_string(alert_message) if alert_message else "nil"
+    filter_expr = _lisp_typed_values(filter) if filter is not None else "nil"
 
-        # 1) Try implied (PickFirst) selection.
-        req_id1 = str(uuid.uuid4())
-        cursor0 = int(stream.cursor)
-        expr1 = _lisp_concat(
-            _MCP_SELECTION_LISP_LIB,
-            f"(mcp-selection-implied-lite {_lisp_string(req_id1)} {mo})\n",
-        )
-        r1 = send_command(ctx, expr1, wait=True, timeout_sec=timeout_sec)
-        log_block1 = r1.get("log") or {}
-        initial_text1 = str(log_block1.get("text") or "")
-        cursor1 = log_block1.get("cursor")
-        out1 = _collect_selection_stream_lite(
-            streams=state.streams,
-            stream_id=stream.stream_id,
-            req_id=req_id1,
-            timeout_sec=timeout_sec,
-            initial_text=initial_text1,
-            cursor=int(cursor1) if cursor1 is not None else cursor0,
-        )
-        out1["dwg"] = dwg
-        state.audit.log(
-            "selection",
-            {
-                "phase": "implied",
-                "req_id": req_id1,
-                "max_objects": max_objects,
-                "count": out1.get("count"),
-                "timed_out": out1.get("timed_out"),
-            },
-            dwg=dwg,
-        )
+    expr2 = _lisp_concat(
+        _MCP_SELECTION_LISP_LIB,
+        f"(mcp-selection-prompt-lite {_lisp_string(req_id2)} {prompt_expr} {alert_expr} {filter_expr} {mo})\n",
+    )
 
-        if not out1.get("timed_out") and int(out1.get("count") or 0) > 0:
-            return out1
-
-        # 2) If nothing selected, prompt interactively.
-        try:
-            cmdactive = int(state.bridge.get_variable("CMDACTIVE") or 0)
-        except Exception:
-            cmdactive = 0
-        if cmdactive != 0:
-            raise RuntimeError(f"AutoCAD is busy (CMDACTIVE={cmdactive}); cannot prompt for selection")
-
-        req_id2 = str(uuid.uuid4())
-        prompt_expr = _lisp_string(prompt) if prompt else "nil"
-        alert_expr = _lisp_string(alert_message) if alert_message else "nil"
-        filter_expr = _lisp_typed_values(filter) if filter is not None else "nil"
-
-        expr2 = _lisp_concat(
-            _MCP_SELECTION_LISP_LIB,
-            f"(mcp-selection-prompt-lite {_lisp_string(req_id2)} {prompt_expr} {alert_expr} {filter_expr} {mo})\n",
-        )
-
-        # Critical: interactive ssget must be the last input in this SendCommand.
-        r2 = send_command(ctx, expr2, wait=False, timeout_sec=0.1)
-        log_block2 = r2.get("log") or {}
-        initial_text2 = str(log_block2.get("text") or "")
-        cursor2 = log_block2.get("cursor")
-        out2 = _collect_selection_stream_lite(
-            streams=state.streams,
-            stream_id=stream.stream_id,
-            req_id=req_id2,
-            timeout_sec=timeout_sec,
-            initial_text=initial_text2,
-            cursor=int(cursor2) if cursor2 is not None else int(out1.get("cursor") or stream.cursor),
-        )
-        out2["dwg"] = dwg
-        state.audit.log(
-            "selection",
-            {
-                "phase": "prompt",
-                "req_id": req_id2,
-                "timeout_sec": timeout_sec,
-                "prompt": prompt,
-                "has_alert_message": bool(alert_message),
-                "has_filter": filter is not None,
-                "max_objects": max_objects,
-                "count": out2.get("count"),
-                "timed_out": out2.get("timed_out"),
-            },
-            dwg=dwg,
-        )
-        return out2
-    finally:
-        if temp_stream_id:
-            try:
-                stop_logging(ctx, temp_stream_id)
-            except Exception:
-                pass
+    # Critical: interactive ssget must be the last input in this SendCommand.
+    r2 = send_command(ctx, expr2, wait=False, timeout_sec=0.1)
+    log_block2 = r2.get("log") or {}
+    initial_text2 = str(log_block2.get("text") or "")
+    cursor2 = log_block2.get("cursor")
+    out2 = _collect_selection_stream_lite(
+        streams=state.streams,
+        stream_id=stream.stream_id,
+        req_id=req_id2,
+        timeout_sec=timeout_sec,
+        initial_text=initial_text2,
+        cursor=int(cursor2) if cursor2 is not None else int(out1.get("cursor") or stream.cursor),
+    )
+    out2["dwg"] = dwg
+    state.audit.log(
+        "selection",
+        {
+            "phase": "prompt",
+            "req_id": req_id2,
+            "timeout_sec": timeout_sec,
+            "prompt": prompt,
+            "has_alert_message": bool(alert_message),
+            "has_filter": filter is not None,
+            "max_objects": max_objects,
+            "count": out2.get("count"),
+            "timed_out": out2.get("timed_out"),
+        },
+        dwg=dwg,
+    )
+    return out2
 
 
 def main() -> None:
