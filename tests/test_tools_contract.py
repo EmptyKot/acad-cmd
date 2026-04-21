@@ -128,6 +128,7 @@ def _make_fake_state():
         bridge=_FakeBridge(),
         streams=_FakeStreams(),
         audit=_FakeAudit(),
+        event_bridge_enabled=False,
     )
 
 
@@ -145,10 +146,26 @@ class ToolsContractTests(unittest.TestCase):
         self.assertIn("busy", res)
         self.assertIn("stale", res)
         self.assertIn("source", res)
+        self.assertIn("event_bridge", res)
         self.assertEqual(res["session_id"], "session-test")
         self.assertEqual(res["connected"], True)
         self.assertEqual(res["dwg"], "D:/tmp/Test1.dwg")
         self.assertEqual(res["source"], "live")
+        self.assertEqual(res["event_bridge"]["enabled"], False)
+        self.assertEqual(res["event_bridge"]["available"], False)
+        self.assertEqual(res["event_bridge"]["connected"], False)
+
+    def test_parse_bool_env(self) -> None:
+        with patch.dict("os.environ", {"AUTOCAD_MCP_EVENT_BRIDGE_ENABLED": "1"}, clear=False):
+            self.assertTrue(tools._parse_bool_env("AUTOCAD_MCP_EVENT_BRIDGE_ENABLED", default=False))
+        with patch.dict("os.environ", {"AUTOCAD_MCP_EVENT_BRIDGE_ENABLED": "true"}, clear=False):
+            self.assertTrue(tools._parse_bool_env("AUTOCAD_MCP_EVENT_BRIDGE_ENABLED", default=False))
+        with patch.dict("os.environ", {"AUTOCAD_MCP_EVENT_BRIDGE_ENABLED": "0"}, clear=False):
+            self.assertFalse(tools._parse_bool_env("AUTOCAD_MCP_EVENT_BRIDGE_ENABLED", default=True))
+        with patch.dict("os.environ", {"AUTOCAD_MCP_EVENT_BRIDGE_ENABLED": "off"}, clear=False):
+            self.assertFalse(tools._parse_bool_env("AUTOCAD_MCP_EVENT_BRIDGE_ENABLED", default=True))
+        with patch.dict("os.environ", {"AUTOCAD_MCP_EVENT_BRIDGE_ENABLED": "unexpected"}, clear=False):
+            self.assertFalse(tools._parse_bool_env("AUTOCAD_MCP_EVENT_BRIDGE_ENABLED", default=False))
 
     def test_send_command_contract_with_log_block(self) -> None:
         fake = _make_fake_state()

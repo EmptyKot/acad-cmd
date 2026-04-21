@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import os
 
 import anyio
 
@@ -34,6 +35,10 @@ async def main() -> None:
     params = StdioServerParameters(
         command=str(py),
         args=["-m", "acad_cmd.server"],
+        env={
+            **os.environ,
+            "PYTHONPATH": str(root / "src"),
+        },
         cwd=str(root),
         encoding="utf-8",
         encoding_error_handler="replace",

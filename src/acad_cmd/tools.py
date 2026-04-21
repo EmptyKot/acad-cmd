@@ -27,6 +27,7 @@ MIN_TIMEOUT_SEC = 0.1
 MAX_TIMEOUT_SEC = 1800.0
 MIN_POLL_INTERVAL_SEC = 0.01
 MAX_POLL_INTERVAL_SEC = 5.0
+EVENT_BRIDGE_ENABLED_ENV = "AUTOCAD_MCP_EVENT_BRIDGE_ENABLED"
 
 
 @dataclass
@@ -35,6 +36,18 @@ class AppState:
     bridge: AutoCADBridge
     streams: OutputStreamManager
     audit: SessionLogger
+    event_bridge_enabled: bool
+
+
+def _parse_bool_env(name: str, default: bool = False) -> bool:
+    raw = (os.environ.get(name) or "").strip().lower()
+    if not raw:
+        return bool(default)
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return bool(default)
 
 
 def _make_state() -> AppState:
@@ -47,6 +60,7 @@ def _make_state() -> AppState:
         bridge=AutoCADBridge(),
         streams=OutputStreamManager(base_dir=base_dir),
         audit=SessionLogger(path=audit_path, session_id=session_id),
+        event_bridge_enabled=_parse_bool_env(EVENT_BRIDGE_ENABLED_ENV, default=False),
     )
 
 
@@ -183,6 +197,7 @@ def get_status(ctx: Context) -> Dict[str, Any]:
                 except Exception:
                     pid = None
     default_stream = state.streams.get_default()
+    event_bridge_enabled = bool(getattr(state, "event_bridge_enabled", False))
     return {
         "ts": iso_now(),
         "session_id": state.session_id,
@@ -199,6 +214,13 @@ def get_status(ctx: Context) -> Dict[str, Any]:
         "cmdactive": cmdactive,
         "locked_major": locked_major,
         "bound_progid": bound_progid,
+        "event_bridge": {
+            "enabled": event_bridge_enabled,
+            # Step 2 only introduces the feature flag.
+            # Availability/connection will be implemented in subsequent roadmap steps.
+            "available": False,
+            "connected": False,
+        },
         "default_stream": (
             {
                 "stream_id": default_stream.stream_id,

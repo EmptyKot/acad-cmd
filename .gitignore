@@ -17,6 +17,8 @@ out/
 dist/
 build/
 *.db
+bin/
+obj/
 
 # Odd Windows artifacts seen in this repo
 nul

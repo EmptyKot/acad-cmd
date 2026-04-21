@@ -71,6 +71,7 @@ Connection / version selection:
 - `AUTOCAD_MCP_ALLOW_NEW_INSTANCE` (default: allow): set to `0` to prevent spawning a new `acad.exe` via COM activation.
 - `AUTOCAD_MCP_USE_DISPATCH` (default: off unless `AUTOCAD_MCP_TARGET_MAJOR` is set): force trying `Dispatch` activation.
 - `AUTOCAD_MCP_PREFER_CURVER` (default: off): prefer registry `CurVer` ProgID when resolving AutoCAD version.
+- `AUTOCAD_MCP_EVENT_BRIDGE_ENABLED` (default: `0`): feature flag for upcoming event bridge path. In step 2 it only exposes the flag in status and does not change command execution behavior.
 
 Launching AutoCAD:
 
@@ -106,6 +107,7 @@ All tools return JSON (FastMCP commonly wraps results as `{ "result": ... }`).
   - returns connection info (DWG label, `ACADVER`, window handle / PID when available) and default stream details
   - includes stability fields for busy/degraded states: `busy`, `stale`, `source`, `error_class`, `cmdactive`
   - includes binding info to avoid cross-version drift: `locked_major`, `bound_progid`
+  - includes `event_bridge.enabled` feature flag (step 2, behavior unchanged)
 - `send_command(command, timeout_sec, wait=true, poll_interval_sec=0.1)`
   - sends raw command line text; when `wait=true` waits until AutoCAD is idle or timeout
   - ensures a default logfile stream and returns a `log` block with new output and updated cursor
@@ -149,3 +151,4 @@ All tools return JSON (FastMCP commonly wraps results as `{ "result": ... }`).
 
 - `scripts/mcp_smoketest_stdio.py`: spawns the server over stdio, lists tools, starts logging, runs a small LISP expression.
 - `scripts/mcp_sanity_acadver.py`: direct COM sanity check that `LOGFILEMODE` output grows after sending `(getvar 'ACADVER)`.
+- `scripts/mcp_baseline_capture.py`: roadmap step 1 baseline capture (`get_status`, `send_command`, `run_lisp`, `LOGFILEMODE`) with JSON report in `out/baseline/`.
