@@ -631,6 +631,32 @@ class AutoCADBridge:
         except Exception:
             return ""
 
+    def get_hwnd(self) -> Optional[int]:
+        _com_init()
+        if not self.ensure_connection():
+            return None
+        try:
+            return self._safe_hwnd()
+        except Exception:
+            return None
+
+    def get_pid(self) -> Optional[int]:
+        _com_init()
+        hwnd = self.get_hwnd()
+        if not hwnd:
+            return None
+        return _get_hwnd_pid(hwnd)
+
+    def get_pipe_name(self, *, pid: Optional[int] = None) -> Optional[str]:
+        _com_init()
+        try:
+            pidv = int(pid) if pid is not None else self.get_pid()
+        except Exception:
+            pidv = None
+        if not pidv or pidv <= 0:
+            return None
+        return f"acad-event-bridge-{pidv}"
+
     def get_status_snapshot(self) -> Dict[str, Any]:
         _com_init()
         connected = self.ensure_connection()

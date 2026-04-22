@@ -1,6 +1,6 @@
 # AcadEventBridge — implementation spec for Codex
 
-## Implementation Status (2026-04-21)
+## Implementation Status (2026-04-22)
 
 - Step 1: baseline for current `acad-cmd` captured.
 - Step 2: Python feature flag `event_bridge_enabled` added (default off).
@@ -9,6 +9,16 @@
 - Step 5: periodic `heartbeat` NDJSON implemented.
 - Step 6: bounded `EventQueue` + `StateTracker` integrated; heartbeat is built from tracker snapshot and sent through queue-backed writer path.
 - Step 7: `DocumentCollection` events implemented and published to stream: `document_created`, `document_activated`, `document_destroyed`.
+- Step 8: command lifecycle events implemented and published to stream: `command_will_start`, `command_ended`, `command_cancelled`, `command_failed`.
+- Step 9: LISP/helper events implemented and published to stream: `lisp_will_start`, `lisp_ended`, `lisp_cancelled`, `unknown_command`, `implied_selection_changed`.
+- Step 10: Python pipe client `bridge_plugin_client.py` implemented with background NDJSON reader, reconnect loop, `hello`/`heartbeat` parsing, and bridge snapshot state (`plugin_version`, `pid`, `last_heartbeat`).
+- Step 11: `event_state.py` implemented; bridge state (`last_seq`, busy/depth, `active_doc_id`, heartbeat fields, and latest `command_*` event details) is now read from one state object without raw JSON parsing in business logic.
+- Step 12: `get_status()` now uses lazy bridge connect by AutoCAD PID and reports `event_bridge` status (`available`, `connected`, `pipe_name`, `plugin_version`, `last_seq`, `last_heartbeat`) when feature flag is enabled.
+- Step 13: `command_waiter.py` implemented with event-first completion waiting (`command_ended`, `command_cancelled`, `command_failed`, `lisp_ended`, `lisp_cancelled`) and explicit fallback callback to legacy `wait_for_idle()`.
+- Step 14: `send_command(wait=true)` now delegates waiting to `CommandWaiter`; when bridge is available it completes via event stream, otherwise it transparently falls back to legacy COM idle wait.
+- Step 15: `run_lisp(wait=true)` and `load_lisp_file(wait=true)` now use `CommandWaiter` with LISP completion profile (`lisp_ended`, `lisp_cancelled`) and preserve fallback to legacy COM idle wait when bridge is unavailable.
+- Step 16: hardening implemented for bridge degradation path: heartbeat-timeout gating before event wait, conservative `dropped_count` guard for overload, disconnect/restart handling for client loop, richer `event_bridge` diagnostics (`queue_depth`, `dropped_count`, `last_error`, timeout settings), and explicit fallback reasons in tool results/audit.
+- Step 17: final MVP smoke run completed (current drawing): fallback path without bridge, explicit `NETLOAD` + `hello/heartbeat`, command lifecycle wait, LISP lifecycle wait, document switching events, and pipe disconnect/recovery scenarios.
 
 ## 1. Что именно делаем
 

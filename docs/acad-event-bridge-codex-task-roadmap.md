@@ -46,52 +46,52 @@
 
 **Готово, когда:** открытие, переключение и закрытие DWG видно в pipe как структурированные события.
 
-### 8. Подписать command lifecycle события
+### [x] 8. Подписать command lifecycle события
 **Что сделать:** добавить `CommandWillStart`, `CommandEnded`, `CommandCancelled`, `CommandFailed`.
 
 **Готово, когда:** обычная команда AutoCAD даёт событие старта и одно завершающее событие.
 
-### 9. Подписать LISP и вспомогательные события
+### [x] 9. Подписать LISP и вспомогательные события
 **Что сделать:** добавить `LispWillStart`, `LispEnded`, `LispCancelled`, `UnknownCommand`, `ImpliedSelectionChanged`.
 
 **Готово, когда:** запуск LISP и изменение implied selection отражаются в event stream.
 
-### 10. Сделать Python-клиент `bridge_plugin_client.py`
+### [x] 10. Сделать Python-клиент `bridge_plugin_client.py`
 **Что сделать:** реализовать подключение к pipe, чтение NDJSON, поток/таск чтения, разбор `hello` и `heartbeat`.
 
 **Готово, когда:** Python-процесс видит живой bridge и умеет хранить его базовое состояние.
 
-### 11. Сделать `event_state.py`
+### [x] 11. Сделать `event_state.py`
 **Что сделать:** хранить `last_seq`, `busy`, `command_depth`, `lisp_depth`, `active_doc_id`, последние command-события и время heartbeat.
 
 **Готово, когда:** состояние bridge можно читать из одного объекта без прямого разбора сырых JSON в бизнес-логике.
 
-### 12. Подключить bridge к `get_status()`
+### [x] 12. Подключить bridge к `get_status()`
 **Что сделать:** добавить lazy connect по PID AutoCAD, `get_pid()`, `get_pipe_name()` и блок `event_bridge` в `get_status()`.
 
 **Готово, когда:** `get_status()` показывает `available/connected/plugin_version/last_seq/last_heartbeat`.
 
-### 13. Реализовать `command_waiter.py`
+### [x] 13. Реализовать `command_waiter.py`
 **Что сделать:** сделать отдельный модуль ожидания completion: сначала по event stream, потом fallback на `wait_for_idle()`.
 
 **Готово, когда:** waiter умеет дождаться `command_ended`, `command_cancelled`, `command_failed`, `lisp_ended`, `lisp_cancelled`.
 
-### 14. Интегрировать waiter в `send_command()`
+### [x] 14. Интегрировать waiter в `send_command()`
 **Что сделать:** после `SendCommand` ждать completion через `CommandWaiter`; если bridge недоступен — сразу использовать старый путь.
 
 **Готово, когда:** `send_command(wait=true)` работает и с bridge, и без bridge, без поломки текущего API.
 
-### 15. Интегрировать waiter в `run_lisp()` и `load_lisp_file()`
+### [x] 15. Интегрировать waiter в `run_lisp()` и `load_lisp_file()`
 **Что сделать:** перевести LISP-вызовы на ту же схему ожидания событий, сохранив текущие fallback-механизмы.
 
 **Готово, когда:** LISP-сценарии завершаются корректно и не требуют отдельной логики ожидания вне bridge.
 
-### 16. Добавить hardening для разрывов и перегрузки
+### [x] 16. Добавить hardening для разрывов и перегрузки
 **Что сделать:** reconnect, heartbeat timeout, обработку disconnect, `dropped_count`, безопасную деградацию обратно на COM/`LOGFILEMODE`.
 
 **Готово, когда:** отключение pipe или падение плагина не ломает сервер и не требует его перезапуска.
 
-### 17. Провести финальный smoke test MVP
+### [x] 17. Провести финальный smoke test MVP
 **Что сделать:** проверить сценарии: без плагина, с `NETLOAD`, простая команда, LISP, переключение документов, разрыв pipe.
 
 **Готово, когда:** все сценарии проходят, а сервер в любом режиме остаётся работоспособным.

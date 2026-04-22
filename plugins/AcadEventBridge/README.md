@@ -72,3 +72,52 @@ Document lifecycle smoke (step 7):
 set PYTHONPATH=%CD%\src
 .venv\Scripts\python.exe scripts\bridge_document_events_smoke.py --timeout-sec 12
 ```
+
+Command lifecycle smoke (step 8):
+
+```bat
+set PYTHONPATH=%CD%\src
+.venv\Scripts\python.exe scripts\bridge_command_events_smoke.py --command "_.REGEN" --timeout-sec 12
+```
+
+LISP/helper lifecycle smoke (step 9):
+
+```bat
+set PYTHONPATH=%CD%\src
+.venv\Scripts\python.exe scripts\bridge_lisp_helper_events_smoke.py --timeout-sec 14
+```
+
+Python bridge client smoke (step 10):
+
+```bat
+set PYTHONPATH=%CD%\src
+.venv\Scripts\python.exe scripts\bridge_client_smoke.py --timeout-sec 8
+```
+
+Command waiter smoke (step 13):
+
+```bat
+set PYTHONPATH=%CD%\src
+.venv\Scripts\python.exe scripts\command_waiter_smoke.py --timeout-sec 12
+```
+
+send_command integration smoke (step 14):
+
+```bat
+set PYTHONPATH=%CD%\src
+.venv\Scripts\python.exe scripts\send_command_event_wait_smoke.py --timeout-sec 12
+```
+
+LISP waiter integration smoke (step 15):
+
+```bat
+set PYTHONPATH=%CD%\src
+.venv\Scripts\python.exe scripts\lisp_waiter_integration_smoke.py
+```
+
+Bridge hardening smoke (step 16):
+
+```bat
+set PYTHONPATH=%CD%\src
+.venv\Scripts\python.exe scripts\bridge_hardening_smoke.py
+```

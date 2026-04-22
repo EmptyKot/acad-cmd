@@ -7,6 +7,12 @@ from typing import Any, Dict, Optional
 from mcp.server.fastmcp import FastMCP, Context
 
 from .autocad_bridge import AutoCADBridge
+from .bridge_plugin_client import EventBridgeClient
+from .command_waiter import (
+    CommandWaiter,
+    LISP_COMPLETION_EVENTS,
+    LISP_START_EVENTS,
+)
 from .lisp import build_load_lisp_command, build_run_lisp_script, lisp_quote_string
 from .output_log import OutputStreamManager
 from .session_log import SessionLogger, iso_now
@@ -28,6 +34,10 @@ MAX_TIMEOUT_SEC = 1800.0
 MIN_POLL_INTERVAL_SEC = 0.01
 MAX_POLL_INTERVAL_SEC = 5.0
 EVENT_BRIDGE_ENABLED_ENV = "AUTOCAD_MCP_EVENT_BRIDGE_ENABLED"
+EVENT_BRIDGE_HEARTBEAT_TIMEOUT_ENV = "AUTOCAD_MCP_EVENT_BRIDGE_HEARTBEAT_TIMEOUT_SEC"
+EVENT_BRIDGE_MAX_DROPPED_FOR_WAIT_ENV = "AUTOCAD_MCP_EVENT_BRIDGE_MAX_DROPPED_FOR_WAIT"
+DEFAULT_EVENT_BRIDGE_HEARTBEAT_TIMEOUT_SEC = 6.0
+DEFAULT_EVENT_BRIDGE_MAX_DROPPED_FOR_WAIT = 0
 
 
 @dataclass
@@ -37,6 +47,11 @@ class AppState:
     streams: OutputStreamManager
     audit: SessionLogger
     event_bridge_enabled: bool
+    event_bridge_client: Optional[EventBridgeClient]
+    event_bridge_pid: Optional[int]
+    event_bridge_heartbeat_timeout_sec: float
+    event_bridge_max_dropped_for_wait: int
+    event_bridge_last_prepare_issue: Optional[str]
 
 
 def _parse_bool_env(name: str, default: bool = False) -> bool:
@@ -50,6 +65,32 @@ def _parse_bool_env(name: str, default: bool = False) -> bool:
     return bool(default)
 
 
+def _parse_float_env(name: str, default: float) -> float:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return float(default)
+    try:
+        value = float(raw)
+    except Exception:
+        return float(default)
+    if value <= 0:
+        return float(default)
+    return float(value)
+
+
+def _parse_int_env(name: str, default: int) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return int(default)
+    try:
+        value = int(raw)
+    except Exception:
+        return int(default)
+    if value < 0:
+        return int(default)
+    return int(value)
+
+
 def _make_state() -> AppState:
     session_id = str(uuid.uuid4())
     base_dir = os.path.join(DEFAULT_LOG_DIR, session_id)
@@ -61,6 +102,17 @@ def _make_state() -> AppState:
         streams=OutputStreamManager(base_dir=base_dir),
         audit=SessionLogger(path=audit_path, session_id=session_id),
         event_bridge_enabled=_parse_bool_env(EVENT_BRIDGE_ENABLED_ENV, default=False),
+        event_bridge_client=None,
+        event_bridge_pid=None,
+        event_bridge_heartbeat_timeout_sec=_parse_float_env(
+            EVENT_BRIDGE_HEARTBEAT_TIMEOUT_ENV,
+            default=DEFAULT_EVENT_BRIDGE_HEARTBEAT_TIMEOUT_SEC,
+        ),
+        event_bridge_max_dropped_for_wait=_parse_int_env(
+            EVENT_BRIDGE_MAX_DROPPED_FOR_WAIT_ENV,
+            default=DEFAULT_EVENT_BRIDGE_MAX_DROPPED_FOR_WAIT,
+        ),
+        event_bridge_last_prepare_issue=None,
     )
 
 
@@ -142,6 +194,213 @@ def _get_current_logfilename() -> Optional[str]:
         return None
 
 
+def _stop_event_bridge_client() -> None:
+    client = state.event_bridge_client
+    if client is not None:
+        try:
+            client.stop()
+        except Exception:
+            pass
+    state.event_bridge_client = None
+    state.event_bridge_pid = None
+
+
+def _bridge_client_is_heartbeat_stale(client: EventBridgeClient) -> bool:
+    try:
+        snap = client.snapshot()
+    except Exception:
+        return False
+    if not bool(snap.connected):
+        return False
+    if snap.last_heartbeat is None:
+        return False
+    age = snap.heartbeat_age_sec
+    if age is None:
+        return False
+    return float(age) > float(state.event_bridge_heartbeat_timeout_sec)
+
+
+def _ensure_event_bridge_client(pid: Optional[int]) -> Optional[EventBridgeClient]:
+    if not state.event_bridge_enabled:
+        _stop_event_bridge_client()
+        return None
+    try:
+        pid_int = int(pid) if pid is not None else None
+    except Exception:
+        pid_int = None
+    if pid_int is None or pid_int <= 0:
+        _stop_event_bridge_client()
+        return None
+
+    current = state.event_bridge_client
+    current_pid = state.event_bridge_pid
+    if current is not None and current_pid == pid_int:
+        current.start()
+        if not current.is_connected():
+            try:
+                current.wait_for_hello(timeout_sec=0.6)
+            except Exception:
+                pass
+        if current.is_connected() and not _bridge_client_is_heartbeat_stale(current):
+            return current
+        try:
+            current.stop()
+        except Exception:
+            pass
+
+    if current is not None:
+        try:
+            current.stop()
+        except Exception:
+            pass
+
+    pipe_name = state.bridge.get_pipe_name(pid=pid_int) or EventBridgeClient.pipe_name_for_pid(pid_int)
+    client = EventBridgeClient(pipe_name=pipe_name)
+    client.start()
+    state.event_bridge_client = client
+    state.event_bridge_pid = pid_int
+    return client
+
+
+def _prepare_bridge_wait_context(
+    *,
+    timeout_sec: float,
+) -> tuple[Optional[EventBridgeClient], Optional[int]]:
+    """Return bridge client + sequence baseline for command waiting."""
+
+    state.event_bridge_last_prepare_issue = None
+    if not state.event_bridge_enabled:
+        state.event_bridge_last_prepare_issue = "bridge_disabled"
+        return None, None
+
+    try:
+        pid = state.bridge.get_pid()
+    except Exception:
+        pid = None
+    try:
+        pid_int = int(pid) if pid is not None else None
+    except Exception:
+        pid_int = None
+    if pid_int is None or pid_int <= 0:
+        state.event_bridge_last_prepare_issue = "acad_pid_unavailable"
+        return None, None
+
+    bridge_client = _ensure_event_bridge_client(pid_int)
+    if bridge_client is None:
+        state.event_bridge_last_prepare_issue = "bridge_client_unavailable"
+        return None, None
+    if not bridge_client.is_connected():
+        try:
+            bridge_client.wait_for_hello(timeout_sec=0.8)
+        except Exception:
+            pass
+        if not bridge_client.is_connected():
+            state.event_bridge_last_prepare_issue = "bridge_client_disconnected"
+            return None, None
+
+    try:
+        wait_budget = min(
+            max(0.3, timeout_sec * 0.2),
+            max(0.3, state.event_bridge_heartbeat_timeout_sec),
+        )
+        bridge_client.wait_for_heartbeat(timeout_sec=wait_budget)
+    except Exception:
+        state.event_bridge_last_prepare_issue = "heartbeat_wait_failed"
+        return None, None
+    if not bridge_client.heartbeat_is_fresh(state.event_bridge_heartbeat_timeout_sec):
+        state.event_bridge_last_prepare_issue = "heartbeat_timeout"
+        return None, None
+
+    try:
+        snap = bridge_client.snapshot()
+        dropped_count = int(snap.dropped_count or 0)
+        if dropped_count > int(state.event_bridge_max_dropped_for_wait):
+            state.event_bridge_last_prepare_issue = f"dropped_count_exceeded:{dropped_count}"
+            return None, None
+
+        # Drain backlog before taking baseline sequence to avoid stale events.
+        bridge_client.drain_messages()
+        snap = bridge_client.snapshot()
+        after_seq = snap.last_seq
+        if after_seq is None:
+            wait_budget = min(
+                max(0.3, timeout_sec * 0.2),
+                max(0.3, state.event_bridge_heartbeat_timeout_sec),
+            )
+            bridge_client.wait_for_heartbeat(timeout_sec=wait_budget)
+            after_seq = bridge_client.snapshot().last_seq
+        if after_seq is None:
+            state.event_bridge_last_prepare_issue = "baseline_seq_unavailable"
+            return None, None
+        state.event_bridge_last_prepare_issue = None
+        return bridge_client, int(after_seq)
+    except Exception:
+        state.event_bridge_last_prepare_issue = "bridge_snapshot_failed"
+        return None, None
+
+
+def _wait_for_completion_with_fallback(
+    *,
+    bridge_client: Optional[EventBridgeClient],
+    wait_after_seq: Optional[int],
+    timeout_sec: float,
+    poll_interval_sec: float,
+    start_events: Optional[set[str]] = None,
+    completion_events: Optional[set[str]] = None,
+):
+    waiter = CommandWaiter(heartbeat_timeout_sec=state.event_bridge_heartbeat_timeout_sec)
+    wait_result = waiter.wait_for_completion(
+        bridge_client=bridge_client,
+        after_seq=wait_after_seq,
+        timeout_sec=timeout_sec,
+        fallback_wait=lambda t: state.bridge.wait_for_idle(
+            timeout_sec=t,
+            poll_interval_sec=poll_interval_sec,
+        ),
+        start_events=start_events,
+        completion_events=completion_events,
+    )
+    if bridge_client is not None and wait_result.source in (
+        "fallback_bridge_disconnected",
+        "fallback_after_event_timeout",
+    ):
+        try:
+            bridge_client.stop()
+            bridge_client.start()
+        except Exception:
+            pass
+    return wait_result
+
+
+def _apply_wait_result_to_command_result(
+    *,
+    result: Dict[str, Any],
+    wait_result: Any,
+) -> Dict[str, Any]:
+    result["completed"] = bool(wait_result.completed)
+    result["needs_input"] = bool(wait_result.needs_input)
+    result["wait_source"] = wait_result.source
+    result["wait_completion_event"] = wait_result.completion_event
+    result["wait_completion_seq"] = wait_result.completion_seq
+    result["wait_started_seen"] = wait_result.started_seen
+    result["wait_fallback_used"] = wait_result.fallback_used
+    return result
+
+
+def _refresh_waited_command_output(result: Dict[str, Any]) -> Dict[str, Any]:
+    result["last_prompt"] = state.bridge.get_last_prompt()
+    stream = state.streams.get_default()
+    if stream and stream.mode == "logfile" and stream.logfile_path:
+        text, new_cursor, truncated = state.streams.read_new(stream.stream_id, stream.cursor, 65536)
+        result["log"] = {
+            "stream_id": stream.stream_id,
+            "cursor": new_cursor,
+            "text": text,
+            "truncated": truncated,
+        }
+    return result
+
+
 @mcp.tool()
 def get_status(ctx: Context) -> Dict[str, Any]:
     snapshot = None
@@ -185,19 +444,54 @@ def get_status(ctx: Context) -> Dict[str, Any]:
             except Exception:
                 acadver = None
             try:
-                hwnd = int(getattr(state.bridge.acad, "HWND", 0) or 0)
+                hwnd = state.bridge.get_hwnd()
             except Exception:
                 hwnd = None
-            if hwnd:
-                try:
-                    import win32process
+            try:
+                pid = state.bridge.get_pid()
+            except Exception:
+                pid = None
 
-                    _tid, pidv = win32process.GetWindowThreadProcessId(hwnd)
-                    pid = int(pidv)
-                except Exception:
-                    pid = None
     default_stream = state.streams.get_default()
     event_bridge_enabled = bool(getattr(state, "event_bridge_enabled", False))
+    bridge_client = _ensure_event_bridge_client(pid if connected else None)
+    event_bridge: Dict[str, Any] = {
+        "enabled": event_bridge_enabled,
+        "available": False,
+        "connected": False,
+        "heartbeat_timeout_sec": state.event_bridge_heartbeat_timeout_sec,
+        "max_dropped_for_wait": state.event_bridge_max_dropped_for_wait,
+        "degraded_reason": state.event_bridge_last_prepare_issue,
+    }
+    if bridge_client is not None:
+        try:
+            bridge_client.wait_for_hello(timeout_sec=0.35)
+        except Exception:
+            pass
+        snap = bridge_client.snapshot()
+        event_bridge = {
+            "enabled": event_bridge_enabled,
+            "available": bool(snap.available),
+            "connected": bool(snap.connected),
+            "pipe_name": snap.pipe_name,
+            "plugin_version": snap.plugin_version,
+            "last_seq": snap.last_seq,
+            "last_heartbeat": snap.last_heartbeat,
+            "plugin_pid": snap.plugin_pid,
+            "busy": snap.busy,
+            "heartbeat_age_sec": snap.heartbeat_age_sec,
+            "queue_depth": snap.queue_depth,
+            "dropped_count": snap.dropped_count,
+            "last_error": snap.last_error,
+            "heartbeat_timeout_sec": state.event_bridge_heartbeat_timeout_sec,
+            "max_dropped_for_wait": state.event_bridge_max_dropped_for_wait,
+            "degraded_reason": state.event_bridge_last_prepare_issue,
+        }
+    elif event_bridge_enabled and connected:
+        pipe_name = state.bridge.get_pipe_name(pid=pid) if pid else None
+        if pipe_name:
+            event_bridge["pipe_name"] = pipe_name
+
     return {
         "ts": iso_now(),
         "session_id": state.session_id,
@@ -214,13 +508,7 @@ def get_status(ctx: Context) -> Dict[str, Any]:
         "cmdactive": cmdactive,
         "locked_major": locked_major,
         "bound_progid": bound_progid,
-        "event_bridge": {
-            "enabled": event_bridge_enabled,
-            # Step 2 only introduces the feature flag.
-            # Availability/connection will be implemented in subsequent roadmap steps.
-            "available": False,
-            "connected": False,
-        },
+        "event_bridge": event_bridge,
         "default_stream": (
             {
                 "stream_id": default_stream.stream_id,
@@ -447,21 +735,50 @@ def send_command(
     timeout_sec = _normalize_timeout_sec(timeout_sec)
     poll_interval_sec = _normalize_poll_interval_sec(poll_interval_sec)
     dwg = state.bridge.get_dwg_label()
+
+    bridge_client: Optional[EventBridgeClient] = None
+    wait_after_seq: Optional[int] = None
+    if wait:
+        bridge_client, wait_after_seq = _prepare_bridge_wait_context(timeout_sec=timeout_sec)
+
     command_id = state.bridge.send_command(command)
 
     state.audit.log(
         "send_command",
-        {"command_id": command_id, "command": command, "wait": wait, "timeout_sec": timeout_sec},
+        {
+            "command_id": command_id,
+            "command": command,
+            "wait": wait,
+            "timeout_sec": timeout_sec,
+            "bridge_wait_enabled": bool(bridge_client is not None),
+            "bridge_wait_after_seq": wait_after_seq,
+            "bridge_wait_prepare_issue": state.event_bridge_last_prepare_issue,
+        },
         dwg=dwg,
     )
 
     completed = True
     needs_input = False
+    wait_source = "no_wait"
+    wait_completion_event = None
+    wait_completion_seq = None
+    wait_started_seen = False
+    wait_fallback_used = False
 
     if wait:
-        wr = state.bridge.wait_for_idle(timeout_sec=timeout_sec, poll_interval_sec=poll_interval_sec)
-        completed = wr.completed
-        needs_input = wr.needs_input
+        wait_result = _wait_for_completion_with_fallback(
+            bridge_client=bridge_client,
+            wait_after_seq=wait_after_seq,
+            timeout_sec=timeout_sec,
+            poll_interval_sec=poll_interval_sec,
+        )
+        completed = wait_result.completed
+        needs_input = wait_result.needs_input
+        wait_source = wait_result.source
+        wait_completion_event = wait_result.completion_event
+        wait_completion_seq = wait_result.completion_seq
+        wait_started_seen = wait_result.started_seen
+        wait_fallback_used = wait_result.fallback_used
 
     last_prompt = state.bridge.get_last_prompt()
 
@@ -485,6 +802,12 @@ def send_command(
             "needs_input": needs_input,
             "last_prompt": last_prompt,
             "has_log": bool(log_block),
+            "wait_source": wait_source,
+            "wait_completion_event": wait_completion_event,
+            "wait_completion_seq": wait_completion_seq,
+            "wait_started_seen": wait_started_seen,
+            "wait_fallback_used": wait_fallback_used,
+            "bridge_wait_prepare_issue": state.event_bridge_last_prepare_issue,
         },
         dwg=dwg,
     )
@@ -495,6 +818,12 @@ def send_command(
         "sent": command,
         "completed": completed,
         "needs_input": needs_input,
+        "wait_source": wait_source,
+        "wait_completion_event": wait_completion_event,
+        "wait_completion_seq": wait_completion_seq,
+        "wait_started_seen": wait_started_seen,
+        "wait_fallback_used": wait_fallback_used,
+        "bridge_wait_prepare_issue": state.event_bridge_last_prepare_issue,
         "last_prompt": last_prompt,
         "log": log_block,
     }
@@ -508,10 +837,40 @@ def load_lisp_file(
     wait: bool = True,
 ) -> Dict[str, Any]:
     _ensure_connected()
+    timeout_sec = _normalize_timeout_sec(timeout_sec)
     dwg = state.bridge.get_dwg_label()
     cmd = build_load_lisp_command(path)
     state.audit.log("load_lisp_file", {"path": path, "command": cmd}, dwg=dwg)
-    return send_command(ctx, cmd, wait=wait, timeout_sec=timeout_sec)
+
+    if not wait:
+        return send_command(ctx, cmd, wait=False, timeout_sec=timeout_sec)
+
+    bridge_client, wait_after_seq = _prepare_bridge_wait_context(timeout_sec=timeout_sec)
+    result = send_command(ctx, cmd, wait=False, timeout_sec=timeout_sec)
+    wait_result = _wait_for_completion_with_fallback(
+        bridge_client=bridge_client,
+        wait_after_seq=wait_after_seq,
+        timeout_sec=timeout_sec,
+        poll_interval_sec=0.1,
+        start_events=LISP_START_EVENTS,
+        completion_events=LISP_COMPLETION_EVENTS,
+    )
+    result = _apply_wait_result_to_command_result(result=result, wait_result=wait_result)
+    result = _refresh_waited_command_output(result)
+    state.audit.log(
+        "load_lisp_file_wait_result",
+        {
+            "path": path,
+            "completed": result.get("completed"),
+            "needs_input": result.get("needs_input"),
+            "wait_source": result.get("wait_source"),
+            "wait_completion_event": result.get("wait_completion_event"),
+            "wait_completion_seq": result.get("wait_completion_seq"),
+            "wait_fallback_used": result.get("wait_fallback_used"),
+        },
+        dwg=dwg,
+    )
+    return result
 
 
 @mcp.tool()
@@ -522,11 +881,42 @@ def run_lisp(
     wait: bool = True,
 ) -> Dict[str, Any]:
     _ensure_connected()
+    timeout_sec = _normalize_timeout_sec(timeout_sec)
     dwg = state.bridge.get_dwg_label()
     marker_id = str(uuid.uuid4())
     script = build_run_lisp_script(expr, marker_id)
     state.audit.log("run_lisp", {"expr": expr, "marker_id": marker_id}, dwg=dwg)
-    result = send_command(ctx, script, wait=wait, timeout_sec=timeout_sec)
+
+    if not wait:
+        result = send_command(ctx, script, wait=False, timeout_sec=timeout_sec)
+        result["marker_id"] = marker_id
+        return result
+
+    bridge_client, wait_after_seq = _prepare_bridge_wait_context(timeout_sec=timeout_sec)
+    result = send_command(ctx, script, wait=False, timeout_sec=timeout_sec)
+    wait_result = _wait_for_completion_with_fallback(
+        bridge_client=bridge_client,
+        wait_after_seq=wait_after_seq,
+        timeout_sec=timeout_sec,
+        poll_interval_sec=0.1,
+        start_events=LISP_START_EVENTS,
+        completion_events=LISP_COMPLETION_EVENTS,
+    )
+    result = _apply_wait_result_to_command_result(result=result, wait_result=wait_result)
+    result = _refresh_waited_command_output(result)
+    state.audit.log(
+        "run_lisp_wait_result",
+        {
+            "marker_id": marker_id,
+            "completed": result.get("completed"),
+            "needs_input": result.get("needs_input"),
+            "wait_source": result.get("wait_source"),
+            "wait_completion_event": result.get("wait_completion_event"),
+            "wait_completion_seq": result.get("wait_completion_seq"),
+            "wait_fallback_used": result.get("wait_fallback_used"),
+        },
+        dwg=dwg,
+    )
     result["marker_id"] = marker_id
     return result
 
