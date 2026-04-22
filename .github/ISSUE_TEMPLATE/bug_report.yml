@@ -1,0 +1,44 @@
+name: Bug report
+description: Report a reproducible defect
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Provide exact steps, commands, and inputs.
+      placeholder: |
+        1. Start AutoCAD ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python version, AutoCAD version, and relevant env vars.
+      placeholder: |
+        OS: Windows 11
+        Python: 3.11.x
+        AutoCAD: 2021
+        AUTOCAD_MCP_TARGET_MAJOR=24
+    validations:
+      required: true

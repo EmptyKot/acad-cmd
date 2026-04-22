@@ -16,6 +16,14 @@ What it does:
 - AutoCAD (tested primarily with AutoCAD 2021; other versions may work)
 - Python 3.10+
 
+## Compatibility (current baseline)
+
+| Component | Status |
+| --- | --- |
+| Windows 10/11 | Supported |
+| AutoCAD 2021 (major 24) | Primary tested target |
+| Python 3.10+ | Supported |
+
 ## Install
 
 ```bat
@@ -152,3 +160,22 @@ All tools return JSON (FastMCP commonly wraps results as `{ "result": ... }`).
 - `scripts/mcp_smoketest_stdio.py`: spawns the server over stdio, lists tools, starts logging, runs a small LISP expression.
 - `scripts/mcp_sanity_acadver.py`: direct COM sanity check that `LOGFILEMODE` output grows after sending `(getvar 'ACADVER)`.
 - `scripts/mcp_baseline_capture.py`: roadmap step 1 baseline capture (`get_status`, `send_command`, `run_lisp`, `LOGFILEMODE`) with JSON report in `out/baseline/`.
+
+Run unit tests:
+
+```bat
+python -m unittest discover -s tests -p "test_*.py"
+```
+
+Run integration tests (real AutoCAD required):
+
+```bat
+set ACAD_MCP_RUN_INTEGRATION=1
+python -m unittest discover -s tests -p "test_*.py"
+```
+
+## Repository Docs
+
+- Contribution guide: `CONTRIBUTING.md`
+- Security policy: `SECURITY.md`
+- License: `LICENSE`

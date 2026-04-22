@@ -7,9 +7,32 @@ name = "acad-cmd"
 version = "0.1.0"
 description = "MCP server for AutoCAD command line I/O via COM"
 requires-python = ">=3.10"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+  { name = "acad-cmd contributors" },
+]
+keywords = ["autocad", "mcp", "windows", "com", "cad"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
   "mcp>=1.0.0",
   "pywin32>=306",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
 ]
 
 [project.scripts]

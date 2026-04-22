@@ -12,6 +12,7 @@ venv/
 logs/
 *.log
 out/
+tmp/
 
 # Build / caches
 dist/
@@ -28,6 +29,11 @@ nul-
 .DS_Store
 Thumbs.db
 TODO.md
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
 
 # Local Visual Studio solution
 /MCP AutoCad.sln

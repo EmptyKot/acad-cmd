@@ -129,6 +129,14 @@ def _make_fake_state():
         streams=_FakeStreams(),
         audit=_FakeAudit(),
         event_bridge_enabled=False,
+        event_bridge_client=None,
+        event_bridge_pid=None,
+        event_bridge_heartbeat_timeout_sec=6.0,
+        event_bridge_max_dropped_for_wait=0,
+        event_bridge_object_events_requested=False,
+        event_bridge_autoload_enabled=False,
+        event_bridge_autoload_dll=None,
+        event_bridge_last_prepare_issue=None,
     )
 
 
