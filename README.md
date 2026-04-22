@@ -8,6 +8,8 @@ What it does:
 - open DWG files and switch active AutoCAD context to the opened drawing
 - use persistent full command history logging via AutoCAD `LOGFILEMODE` / `LOGFILENAME` (primary output source)
 - optionally read `LASTPROMPT` for legacy compatibility
+- optionally use in-process `.NET` event bridge (`AcadEventBridge`) for structured command/document lifecycle events
+- use event-first completion waits (with automatic fallback to COM idle wait)
 - write an audit log (JSONL) for every tool call
 
 ## Requirements
@@ -71,6 +73,16 @@ Important connection behavior:
 
 Runtime logs are written under `logs/acad-cmd/<session_id>/`.
 
+## Event Bridge (optional)
+
+`acad-cmd` can use an in-process AutoCAD plugin (`AcadEventBridge`) over named pipe for structured events.
+
+- command/lisp completion can be resolved from event stream (faster and more deterministic than text-only checks)
+- document lifecycle events are available in status/diagnostics
+- if bridge is unavailable or degraded, server automatically falls back to legacy COM idle wait and logfile path
+
+Plugin source and smoke commands are in `plugins/AcadEventBridge/README.md`.
+
 ## Configuration (environment variables)
 
 Connection / version selection:
@@ -79,7 +91,15 @@ Connection / version selection:
 - `AUTOCAD_MCP_ALLOW_NEW_INSTANCE` (default: allow): set to `0` to prevent spawning a new `acad.exe` via COM activation.
 - `AUTOCAD_MCP_USE_DISPATCH` (default: off unless `AUTOCAD_MCP_TARGET_MAJOR` is set): force trying `Dispatch` activation.
 - `AUTOCAD_MCP_PREFER_CURVER` (default: off): prefer registry `CurVer` ProgID when resolving AutoCAD version.
-- `AUTOCAD_MCP_EVENT_BRIDGE_ENABLED` (default: `0`): feature flag for upcoming event bridge path. In step 2 it only exposes the flag in status and does not change command execution behavior.
+- `AUTOCAD_MCP_EVENT_BRIDGE_ENABLED` (default: `0`): enables bridge integration path.
+
+Event bridge behavior:
+
+- `AUTOCAD_MCP_EVENT_BRIDGE_HEARTBEAT_TIMEOUT_SEC` (default: `6.0`): heartbeat freshness threshold for bridge waits.
+- `AUTOCAD_MCP_EVENT_BRIDGE_MAX_DROPPED_FOR_WAIT` (default: `0`): max tolerated dropped queue messages before degrading to fallback wait.
+- `AUTOCAD_MCP_EVENT_BRIDGE_OBJECT_EVENTS_ENABLED` (default: `1`): desired plugin-side object events mode (`AEB_OBJECT_EVENTS_ON/OFF` sync).
+- `AUTOCAD_MCP_EVENT_BRIDGE_AUTOLOAD` (default: `1`): when bridge is enabled, allow best-effort plugin autoload (`NETLOAD`) if pipe is unavailable.
+- `AUTOCAD_MCP_EVENT_BRIDGE_AUTOLOAD_DLL` (optional): explicit path to `AcadEventBridge.dll` for autoload; otherwise server tries default build locations.
 
 Launching AutoCAD:
 
@@ -115,10 +135,12 @@ All tools return JSON (FastMCP commonly wraps results as `{ "result": ... }`).
   - returns connection info (DWG label, `ACADVER`, window handle / PID when available) and default stream details
   - includes stability fields for busy/degraded states: `busy`, `stale`, `source`, `error_class`, `cmdactive`
   - includes binding info to avoid cross-version drift: `locked_major`, `bound_progid`
-  - includes `event_bridge.enabled` feature flag (step 2, behavior unchanged)
+  - includes `event_bridge` diagnostics: availability/connectivity, pipe/plugin metadata, heartbeat/queue state, degradation reason, and optional service status
 - `send_command(command, timeout_sec, wait=true, poll_interval_sec=0.1)`
-  - sends raw command line text; when `wait=true` waits until AutoCAD is idle or timeout
+  - sends raw command line text
+  - when `wait=true`: uses bridge event-first completion wait when available, otherwise falls back to COM idle wait
   - ensures a default logfile stream and returns a `log` block with new output and updated cursor
+  - returns wait diagnostics (`wait_source`, `wait_completion_event`, `wait_completion_seq`, `wait_fallback_used`, `bridge_wait_prepare_issue`)
 - `open_drawing(path, timeout_sec, read_only=false)`
   - opens a DWG and guarantees active context switch to the target document (or errors on timeout)
   - returns `dwg_before`, `dwg`, `already_open`, `opened`, `activated`
@@ -137,8 +159,10 @@ All tools return JSON (FastMCP commonly wraps results as `{ "result": ... }`).
   - stops a stream; best-effort disables `LOGFILEMODE` when the last server-started logfile stream is stopped
 - `load_lisp_file(path, timeout_sec, wait=true)`
   - sends `(load "...")` (path normalized for AutoCAD)
+  - when `wait=true`: uses bridge LISP completion events first, then COM fallback if needed
 - `run_lisp(expr, timeout_sec, wait=true)`
   - executes an AutoLISP expression/script via `SendCommand` with start/end markers in the command history
+  - when `wait=true`: uses bridge LISP completion events first, then COM fallback if needed
 - `selection(timeout_sec, prompt=null, filter=null, max_objects=null, alert_message=null)`
   - returns currently selected objects (PickFirst); if none, prompts the user to select objects
   - when `alert_message` is provided and interactive selection is needed, shows standard AutoCAD `alert`

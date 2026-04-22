@@ -35,5 +35,11 @@ TODO.md
 .coverage
 coverage.xml
 
+# Local planning docs (not for public repository)
+docs/acad-cmd-baseline-smoke-checklist.md
+docs/acad-event-bridge-codex-task-roadmap.md
+docs/acad-event-bridge-implementation-spec.md
+docs/autocad-event-bridge-roadmap.md
+
 # Local Visual Studio solution
 /MCP AutoCad.sln
