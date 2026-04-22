@@ -1,4 +1,6 @@
 import os
+import shutil
+import hashlib
 
 import uuid
 from dataclasses import dataclass
@@ -36,6 +38,9 @@ MAX_POLL_INTERVAL_SEC = 5.0
 EVENT_BRIDGE_ENABLED_ENV = "AUTOCAD_MCP_EVENT_BRIDGE_ENABLED"
 EVENT_BRIDGE_HEARTBEAT_TIMEOUT_ENV = "AUTOCAD_MCP_EVENT_BRIDGE_HEARTBEAT_TIMEOUT_SEC"
 EVENT_BRIDGE_MAX_DROPPED_FOR_WAIT_ENV = "AUTOCAD_MCP_EVENT_BRIDGE_MAX_DROPPED_FOR_WAIT"
+EVENT_BRIDGE_OBJECT_EVENTS_ENABLED_ENV = "AUTOCAD_MCP_EVENT_BRIDGE_OBJECT_EVENTS_ENABLED"
+EVENT_BRIDGE_AUTOLOAD_ENV = "AUTOCAD_MCP_EVENT_BRIDGE_AUTOLOAD"
+EVENT_BRIDGE_AUTOLOAD_DLL_ENV = "AUTOCAD_MCP_EVENT_BRIDGE_AUTOLOAD_DLL"
 DEFAULT_EVENT_BRIDGE_HEARTBEAT_TIMEOUT_SEC = 6.0
 DEFAULT_EVENT_BRIDGE_MAX_DROPPED_FOR_WAIT = 0
 
@@ -51,6 +56,9 @@ class AppState:
     event_bridge_pid: Optional[int]
     event_bridge_heartbeat_timeout_sec: float
     event_bridge_max_dropped_for_wait: int
+    event_bridge_object_events_requested: bool
+    event_bridge_autoload_enabled: bool
+    event_bridge_autoload_dll: Optional[str]
     event_bridge_last_prepare_issue: Optional[str]
 
 
@@ -112,6 +120,15 @@ def _make_state() -> AppState:
             EVENT_BRIDGE_MAX_DROPPED_FOR_WAIT_ENV,
             default=DEFAULT_EVENT_BRIDGE_MAX_DROPPED_FOR_WAIT,
         ),
+        event_bridge_object_events_requested=_parse_bool_env(
+            EVENT_BRIDGE_OBJECT_EVENTS_ENABLED_ENV,
+            default=True,
+        ),
+        event_bridge_autoload_enabled=_parse_bool_env(
+            EVENT_BRIDGE_AUTOLOAD_ENV,
+            default=True,
+        ),
+        event_bridge_autoload_dll=(os.environ.get(EVENT_BRIDGE_AUTOLOAD_DLL_ENV) or "").strip() or None,
         event_bridge_last_prepare_issue=None,
     )
 
@@ -194,6 +211,175 @@ def _get_current_logfilename() -> Optional[str]:
         return None
 
 
+def _repo_root() -> str:
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+
+def _resolve_bridge_dll_path() -> Optional[str]:
+    explicit = (state.event_bridge_autoload_dll or "").strip()
+    if explicit:
+        path = os.path.abspath(os.path.expanduser(os.path.expandvars(explicit)))
+        return path if os.path.isfile(path) else None
+
+    base_dir = os.path.join(_repo_root(), "plugins", "AcadEventBridge", "bin", "Debug", "net48")
+    if not os.path.isdir(base_dir):
+        return None
+
+    candidates: list[str] = []
+    primary = os.path.join(base_dir, "AcadEventBridge.dll")
+
+    hotbuild_dirs: list[tuple[float, str]] = []
+    try:
+        for name in os.listdir(base_dir):
+            if not str(name).lower().startswith("hotbuild"):
+                continue
+            d = os.path.join(base_dir, name)
+            if not os.path.isdir(d):
+                continue
+            dll = os.path.join(d, "AcadEventBridge.dll")
+            if not os.path.isfile(dll):
+                continue
+            try:
+                mtime = os.path.getmtime(dll)
+            except Exception:
+                mtime = 0.0
+            hotbuild_dirs.append((mtime, dll))
+    except Exception:
+        pass
+
+    for _mtime, dll in sorted(hotbuild_dirs, key=lambda x: x[0], reverse=True):
+        candidates.append(dll)
+
+    if os.path.isfile(primary):
+        candidates.append(primary)
+
+    return candidates[0] if candidates else None
+
+
+def _is_ascii_path(path: str) -> bool:
+    try:
+        str(path).encode("ascii")
+        return True
+    except Exception:
+        return False
+
+
+def _candidate_ascii_cache_dirs() -> list[str]:
+    out: list[str] = []
+    env_cache = (os.environ.get("AUTOCAD_MCP_NETLOAD_CACHE_DIR") or "").strip()
+    local_app_data = (os.environ.get("LOCALAPPDATA") or "").strip()
+    temp_dir = (os.environ.get("TEMP") or "").strip()
+    for raw in (
+        env_cache,
+        r"C:\Temp\acad_event_bridge_cache",
+        (os.path.join(local_app_data, "acad_event_bridge_cache") if local_app_data else ""),
+        (os.path.join(temp_dir, "acad_event_bridge_cache") if temp_dir else ""),
+        r"C:\Windows\Temp\acad_event_bridge_cache",
+    ):
+        if not raw:
+            continue
+        path = os.path.abspath(os.path.expanduser(os.path.expandvars(raw)))
+        if not _is_ascii_path(path):
+            continue
+        if path not in out:
+            out.append(path)
+    return out
+
+
+def _file_sha256_hex(path: str) -> Optional[str]:
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            while True:
+                chunk = fh.read(1024 * 1024)
+                if not chunk:
+                    break
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return None
+
+
+def _prepare_bridge_dll_for_netload(dll_path: str) -> Optional[str]:
+    src = os.path.abspath(os.path.expanduser(os.path.expandvars(dll_path)))
+    if not os.path.isfile(src):
+        return None
+    if _is_ascii_path(src):
+        return src
+
+    try:
+        mtime = int(os.path.getmtime(src))
+    except Exception:
+        mtime = 0
+    try:
+        size = int(os.path.getsize(src))
+    except Exception:
+        size = 0
+    src_hash = _file_sha256_hex(src)
+    hash_part = (src_hash[:12] if src_hash else "nohash")
+    stamp = f"{hash_part}_{mtime:x}_{size:x}"
+    filename = f"AcadEventBridge_{stamp}.dll"
+
+    for cache_dir in _candidate_ascii_cache_dirs():
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            dst = os.path.join(cache_dir, filename)
+            need_copy = True
+            if os.path.isfile(dst):
+                if src_hash:
+                    need_copy = _file_sha256_hex(dst) != src_hash
+                else:
+                    need_copy = os.path.getsize(dst) != size
+            if need_copy:
+                shutil.copy2(src, dst)
+            if os.path.isfile(dst):
+                if src_hash and _file_sha256_hex(dst) != src_hash:
+                    continue
+                return dst
+        except Exception:
+            continue
+
+    return None
+
+
+def _build_netload_command(dll_path: str) -> str:
+    normalized = str(dll_path).replace("\\", "/")
+    return f'(command "_.NETLOAD" "{lisp_quote_string(normalized)}")\n(princ)'
+
+
+def _try_netload_bridge_plugin(*, timeout_sec: float) -> bool:
+    dll_path = _resolve_bridge_dll_path()
+    if not dll_path:
+        state.event_bridge_last_prepare_issue = "bridge_autoload_dll_not_found"
+        return False
+    load_path = _prepare_bridge_dll_for_netload(dll_path)
+    if not load_path:
+        state.event_bridge_last_prepare_issue = "bridge_autoload_ascii_path_unavailable"
+        return False
+
+    try:
+        state.bridge.send_command(_build_netload_command(load_path))
+        wr = state.bridge.wait_for_idle(timeout_sec=max(5.0, float(timeout_sec)), poll_interval_sec=0.2)
+        if not bool(getattr(wr, "completed", False)):
+            state.event_bridge_last_prepare_issue = "bridge_autoload_timeout"
+            return False
+        state.event_bridge_last_prepare_issue = None
+        return True
+    except Exception:
+        state.event_bridge_last_prepare_issue = "bridge_autoload_failed"
+        return False
+
+
+def _try_set_bridge_object_events(*, enabled: bool, timeout_sec: float) -> bool:
+    cmd = "AEB_OBJECT_EVENTS_ON" if enabled else "AEB_OBJECT_EVENTS_OFF"
+    try:
+        state.bridge.send_command(cmd + "\n")
+        wr = state.bridge.wait_for_idle(timeout_sec=max(3.0, float(timeout_sec)), poll_interval_sec=0.1)
+        return bool(getattr(wr, "completed", False))
+    except Exception:
+        return False
+
+
 def _stop_event_bridge_client() -> None:
     client = state.event_bridge_client
     if client is not None:
@@ -262,6 +448,86 @@ def _ensure_event_bridge_client(pid: Optional[int]) -> Optional[EventBridgeClien
     return client
 
 
+def _ensure_event_bridge_ready(
+    *,
+    pid: Optional[int],
+    timeout_sec: float,
+    allow_autoload: bool = True,
+    ensure_object_events: bool = True,
+) -> Optional[EventBridgeClient]:
+    client = _ensure_event_bridge_client(pid)
+    if client is not None and not client.is_connected():
+        try:
+            client.wait_for_hello(timeout_sec=0.7)
+        except Exception:
+            pass
+
+    if (client is None or not client.is_connected()) and allow_autoload and state.event_bridge_autoload_enabled:
+        if _try_netload_bridge_plugin(timeout_sec=min(40.0, max(8.0, timeout_sec))):
+            client = _ensure_event_bridge_client(pid)
+            if client is not None and not client.is_connected():
+                try:
+                    client.wait_for_hello(timeout_sec=1.2)
+                except Exception:
+                    pass
+
+    if client is None or not client.is_connected():
+        if state.event_bridge_last_prepare_issue is None:
+            state.event_bridge_last_prepare_issue = "bridge_client_disconnected"
+        return client
+
+    if not ensure_object_events:
+        return client
+
+    desired = bool(state.event_bridge_object_events_requested)
+    current = client.snapshot().object_events_enabled
+    if current is None:
+        # Older plugin, or bridge state unknown: best-effort command anyway.
+        current = False
+    if bool(current) == desired:
+        return client
+
+    if not _try_set_bridge_object_events(enabled=desired, timeout_sec=min(12.0, max(3.0, timeout_sec))):
+        state.event_bridge_last_prepare_issue = "bridge_object_events_toggle_failed"
+        return client
+
+    # Reconnect client to refresh hello snapshot with updated object_events_enabled.
+    try:
+        client.stop()
+        client.start()
+        client.wait_for_hello(timeout_sec=1.0)
+    except Exception:
+        pass
+    return client
+
+
+def _fetch_bridge_service_status(
+    bridge_client: Optional[EventBridgeClient],
+    *,
+    timeout_sec: float = 0.8,
+) -> Optional[Dict[str, Any]]:
+    if bridge_client is None:
+        return None
+    if not bridge_client.request_response_available():
+        return None
+    try:
+        raw = bridge_client.request_status(timeout_sec=timeout_sec)
+    except Exception:
+        return None
+    if not isinstance(raw, dict):
+        return None
+
+    payload = raw.get("payload")
+    payload_dict = payload if isinstance(payload, dict) else None
+    return {
+        "id": raw.get("id"),
+        "ok": bool(raw.get("ok", False)),
+        "ts": raw.get("ts"),
+        "error": raw.get("error"),
+        "payload": payload_dict,
+    }
+
+
 def _prepare_bridge_wait_context(
     *,
     timeout_sec: float,
@@ -285,7 +551,12 @@ def _prepare_bridge_wait_context(
         state.event_bridge_last_prepare_issue = "acad_pid_unavailable"
         return None, None
 
-    bridge_client = _ensure_event_bridge_client(pid_int)
+    bridge_client = _ensure_event_bridge_ready(
+        pid=pid_int,
+        timeout_sec=timeout_sec,
+        allow_autoload=True,
+        ensure_object_events=True,
+    )
     if bridge_client is None:
         state.event_bridge_last_prepare_issue = "bridge_client_unavailable"
         return None, None
@@ -454,13 +725,22 @@ def get_status(ctx: Context) -> Dict[str, Any]:
 
     default_stream = state.streams.get_default()
     event_bridge_enabled = bool(getattr(state, "event_bridge_enabled", False))
-    bridge_client = _ensure_event_bridge_client(pid if connected else None)
+    bridge_client = _ensure_event_bridge_ready(
+        pid=pid if connected else None,
+        timeout_sec=4.0,
+        allow_autoload=True,
+        ensure_object_events=True,
+    )
     event_bridge: Dict[str, Any] = {
         "enabled": event_bridge_enabled,
         "available": False,
         "connected": False,
+        "autoload_enabled": state.event_bridge_autoload_enabled,
+        "autoload_dll": _resolve_bridge_dll_path(),
+        "request_response_available": False,
         "heartbeat_timeout_sec": state.event_bridge_heartbeat_timeout_sec,
         "max_dropped_for_wait": state.event_bridge_max_dropped_for_wait,
+        "object_events_requested": state.event_bridge_object_events_requested,
         "degraded_reason": state.event_bridge_last_prepare_issue,
     }
     if bridge_client is not None:
@@ -469,6 +749,7 @@ def get_status(ctx: Context) -> Dict[str, Any]:
         except Exception:
             pass
         snap = bridge_client.snapshot()
+        service_status = _fetch_bridge_service_status(bridge_client, timeout_sec=0.8)
         event_bridge = {
             "enabled": event_bridge_enabled,
             "available": bool(snap.available),
@@ -478,11 +759,17 @@ def get_status(ctx: Context) -> Dict[str, Any]:
             "last_seq": snap.last_seq,
             "last_heartbeat": snap.last_heartbeat,
             "plugin_pid": snap.plugin_pid,
+            "autoload_enabled": state.event_bridge_autoload_enabled,
+            "autoload_dll": _resolve_bridge_dll_path(),
+            "object_events_enabled": snap.object_events_enabled,
+            "request_response_available": snap.request_response_available,
+            "object_events_requested": state.event_bridge_object_events_requested,
             "busy": snap.busy,
             "heartbeat_age_sec": snap.heartbeat_age_sec,
             "queue_depth": snap.queue_depth,
             "dropped_count": snap.dropped_count,
             "last_error": snap.last_error,
+            "service_status": service_status,
             "heartbeat_timeout_sec": state.event_bridge_heartbeat_timeout_sec,
             "max_dropped_for_wait": state.event_bridge_max_dropped_for_wait,
             "degraded_reason": state.event_bridge_last_prepare_issue,

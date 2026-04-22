@@ -19,6 +19,8 @@
 - Step 15: `run_lisp(wait=true)` and `load_lisp_file(wait=true)` now use `CommandWaiter` with LISP completion profile (`lisp_ended`, `lisp_cancelled`) and preserve fallback to legacy COM idle wait when bridge is unavailable.
 - Step 16: hardening implemented for bridge degradation path: heartbeat-timeout gating before event wait, conservative `dropped_count` guard for overload, disconnect/restart handling for client loop, richer `event_bridge` diagnostics (`queue_depth`, `dropped_count`, `last_error`, timeout settings), and explicit fallback reasons in tool results/audit.
 - Step 17: final MVP smoke run completed (current drawing): fallback path without bridge, explicit `NETLOAD` + `hello/heartbeat`, command lifecycle wait, LISP lifecycle wait, document switching events, and pipe disconnect/recovery scenarios.
+- Step 18: opt-in object events added under `AUTOCAD_MCP_EVENT_BRIDGE_OBJECT_EVENTS_ENABLED`; plugin now publishes `object_appended`, `object_modified`, `object_erased` when enabled and exposes `object_events_enabled` in `hello`/status.
+- Step 19: Python server now auto-loads bridge plugin (`NETLOAD`) when bridge is enabled but pipe is unavailable, and toggles object events via plugin commands (`AEB_OBJECT_EVENTS_ON` / `AEB_OBJECT_EVENTS_OFF`) according to server config, so AutoCAD no longer requires manual bridge setup per session.
 
 ## 1. Что именно делаем
 
@@ -614,7 +616,6 @@ MVP готов, если:
 
 ## 17. Что оставить на phase 2
 
-- request/response поверх pipe;
 - выполнение команд через сам плагин, а не через COM;
 - строгая корреляция по `request_id`;
 - object events под feature flag;

@@ -4,6 +4,7 @@ namespace AcadEventBridge;
 
 public sealed class BridgeHost
 {
+    private readonly BridgeOptions _options;
     private readonly EventQueue _queue;
     private readonly StateTracker _state;
     private readonly PipeServer _pipeServer;
@@ -12,10 +13,18 @@ public sealed class BridgeHost
 
     public BridgeHost()
     {
+        _options = BridgeOptions.FromEnvironment();
         _queue = new EventQueue(capacity: 1024);
         _state = new StateTracker();
-        _pipeServer = new PipeServer(GetPipeName(), _queue, _state);
-        _registrar = new EventRegistrar(_queue, _state);
+        _registrar = new EventRegistrar(
+            _queue,
+            _state,
+            objectEventsEnabled: _options.ObjectEventsEnabled);
+        _pipeServer = new PipeServer(
+            GetPipeName(),
+            _queue,
+            _state,
+            objectEventsEnabledProvider: () => _registrar.ObjectEventsEnabled);
     }
 
     public string PipeName => _pipeServer.PipeName;
@@ -33,6 +42,13 @@ public sealed class BridgeHost
     public int QueueDepth => _queue.Count;
 
     public long DroppedCount => _queue.DroppedCount;
+
+    public bool ObjectEventsEnabled => _registrar.ObjectEventsEnabled;
+
+    public void SetObjectEventsEnabled(bool enabled)
+    {
+        _registrar.SetObjectEventsEnabled(enabled);
+    }
 
     public void Start()
     {

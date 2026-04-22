@@ -2,6 +2,26 @@
 
 Current milestone: roadmap step 4 (`PipeServer` + `hello`).
 
+## Object Events (opt-in)
+
+Object-level events are disabled by default and can be enabled:
+
+1) via environment variable before AutoCAD start:
+
+```bat
+set AUTOCAD_MCP_EVENT_BRIDGE_OBJECT_EVENTS_ENABLED=1
+```
+
+2) at runtime via plugin debug commands (no restart):
+
+```text
+AEB_OBJECT_EVENTS_ON
+AEB_OBJECT_EVENTS_OFF
+```
+
+Python MCP server uses runtime commands to align plugin state automatically, so manual AutoCAD setup is not required in normal MCP flow.
+`hello` contains `object_events_enabled`, and `AEB_STATUS` prints `object_events_enabled=...`.
+
 ## Build
 
 ```bat
@@ -120,4 +140,19 @@ Bridge hardening smoke (step 16):
 ```bat
 set PYTHONPATH=%CD%\src
 .venv\Scripts\python.exe scripts\bridge_hardening_smoke.py
+```
+
+Object events smoke (step 18, opt-in):
+
+```bat
+set PYTHONPATH=%CD%\src
+set AUTOCAD_MCP_EVENT_BRIDGE_OBJECT_EVENTS_ENABLED=1
+.venv\Scripts\python.exe scripts\bridge_object_events_smoke.py
+```
+
+Request/response smoke (step 20):
+
+```bat
+set PYTHONPATH=%CD%\src
+.venv\Scripts\python.exe scripts\bridge_request_response_smoke.py
 ```

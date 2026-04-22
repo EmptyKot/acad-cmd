@@ -2,7 +2,7 @@
 
 ## Current Progress (2026-04-22)
 
-- Completed: steps 1 to 17 from `docs/acad-event-bridge-codex-task-roadmap.md`.
+- Completed: steps 1 to 21 from `docs/acad-event-bridge-codex-task-roadmap.md`.
 - Verified in AutoCAD runtime:
   - `NETLOAD` of `AcadEventBridge.dll`;
   - pipe `hello`;
@@ -15,7 +15,8 @@
   - `run_lisp(wait=true)` and `load_lisp_file(wait=true)` now use LISP-focused waiter completion profile (`lisp_ended`/`lisp_cancelled`) with COM fallback.
   - hardening for disconnect/overload added: heartbeat-timeout guard, dropped-count guard, reconnect handling and fallback diagnostics.
   - final MVP smoke pass completed: fallback/no-bridge, NETLOAD, command, LISP, document switching, disconnect/recovery.
-- Next planned step: post-MVP step 18 (opt-in object events).
+- Step 21 decision (research result): keep COM as the primary command execution path; do not introduce plugin-side command execution at this stage.
+- Next planned step: continue hardening/observability on the current hybrid model (COM execution + bridge events/status).
 
 ## 1. Цель
 

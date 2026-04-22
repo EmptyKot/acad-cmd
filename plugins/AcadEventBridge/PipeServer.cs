@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
@@ -16,14 +17,20 @@ public sealed class PipeServer
     private readonly object _sync = new();
     private readonly EventQueue _queue;
     private readonly StateTracker _state;
+    private readonly Func<bool> _objectEventsEnabledProvider;
     private Thread? _listenerThread;
     private volatile bool _runRequested;
 
-    public PipeServer(string pipeName, EventQueue queue, StateTracker state)
+    public PipeServer(
+        string pipeName,
+        EventQueue queue,
+        StateTracker state,
+        Func<bool> objectEventsEnabledProvider)
     {
         PipeName = pipeName;
         _queue = queue;
         _state = state;
+        _objectEventsEnabledProvider = objectEventsEnabledProvider;
     }
 
     public string PipeName { get; }
@@ -84,10 +91,10 @@ public sealed class PipeServer
             {
                 using var server = new NamedPipeServerStream(
                     PipeName,
-                    PipeDirection.Out,
+                    PipeDirection.InOut,
                     maxNumberOfServerInstances: 1,
                     PipeTransmissionMode.Byte,
-                    PipeOptions.WriteThrough);
+                    PipeOptions.Asynchronous | PipeOptions.WriteThrough);
 
                 server.WaitForConnection();
                 if (!_runRequested)
@@ -96,7 +103,7 @@ public sealed class PipeServer
                 }
 
                 _queue.Clear();
-                WriteHello(server);
+                WriteHello(server, _objectEventsEnabledProvider());
 
                 using var heartbeatStop = new ManualResetEventSlim(false);
                 var heartbeatThread = new Thread(() => RunHeartbeatProducerLoop(heartbeatStop))
@@ -106,6 +113,14 @@ public sealed class PipeServer
                 };
                 heartbeatThread.Start();
 
+                using var requestStop = new ManualResetEventSlim(false);
+                var requestThread = new Thread(() => RunRequestReaderLoop(server, requestStop))
+                {
+                    IsBackground = true,
+                    Name = "AcadEventBridge.RequestReader"
+                };
+                requestThread.Start();
+
                 try
                 {
                     RunWriterLoop(server);
@@ -113,7 +128,9 @@ public sealed class PipeServer
                 finally
                 {
                     heartbeatStop.Set();
+                    requestStop.Set();
                     heartbeatThread.Join(millisecondsTimeout: 1500);
+                    requestThread.Join(millisecondsTimeout: 1500);
                 }
             }
             catch (IOException)
@@ -132,11 +149,12 @@ public sealed class PipeServer
         }
     }
 
-    private static void WriteHello(Stream stream)
+    private static void WriteHello(Stream stream, bool objectEventsEnabled)
     {
         var hello = new HelloMessage
         {
-            Pid = Process.GetCurrentProcess().Id
+            Pid = Process.GetCurrentProcess().Id,
+            ObjectEventsEnabled = objectEventsEnabled
         };
         WriteLine(stream, EventJson.SerializeHello(hello));
     }
@@ -188,6 +206,138 @@ public sealed class PipeServer
 
             Thread.Sleep(10);
         }
+    }
+
+    private void RunRequestReaderLoop(NamedPipeServerStream stream, ManualResetEventSlim stopSignal)
+    {
+        stream.ReadMode = PipeTransmissionMode.Byte;
+
+        var buffer = string.Empty;
+        var chunk = new byte[2048];
+
+        while (_runRequested && !stopSignal.IsSet)
+        {
+            int read;
+            try
+            {
+                read = stream.Read(chunk, 0, chunk.Length);
+            }
+            catch (IOException)
+            {
+                LogError(new IOException("Request reader: pipe was closed while reading request stream."));
+                return;
+            }
+            catch (ObjectDisposedException)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                LogError(ex);
+                return;
+            }
+
+            if (read <= 0)
+            {
+                return;
+            }
+
+            buffer += Utf8.GetString(chunk, 0, read);
+            while (true)
+            {
+                var nl = buffer.IndexOf('\n');
+                if (nl < 0)
+                {
+                    break;
+                }
+
+                var line = buffer.Substring(0, nl).Trim();
+                buffer = buffer.Substring(nl + 1);
+                if (line.Length == 0)
+                {
+                    continue;
+                }
+
+                HandleRequestLine(line);
+            }
+        }
+    }
+
+    private void HandleRequestLine(string line)
+    {
+        if (!EventJson.TryDeserializeRequest(line, out var request, out var parseError))
+        {
+            var response = new ResponseMessage
+            {
+                Id = request?.Id ?? string.Empty,
+                Ok = false,
+                Ts = EventJson.UtcNowIso(),
+                Error = parseError ?? "request_parse_failed"
+            };
+            _queue.Enqueue(EventJson.SerializeResponse(response));
+            return;
+        }
+
+        var method = request!.Method.Trim().ToLowerInvariant();
+        switch (method)
+        {
+            case "ping":
+                _queue.Enqueue(EventJson.SerializeResponse(BuildPingResponse(request.Id)));
+                return;
+            case "status":
+                _queue.Enqueue(EventJson.SerializeResponse(BuildStatusResponse(request.Id)));
+                return;
+            default:
+                _queue.Enqueue(EventJson.SerializeResponse(new ResponseMessage
+                {
+                    Id = request.Id,
+                    Ok = false,
+                    Ts = EventJson.UtcNowIso(),
+                    Error = "unsupported_method"
+                }));
+                return;
+        }
+    }
+
+    private ResponseMessage BuildPingResponse(string requestId)
+    {
+        return new ResponseMessage
+        {
+            Id = requestId,
+            Ok = true,
+            Ts = EventJson.UtcNowIso(),
+            Payload = new Dictionary<string, object?>
+            {
+                ["pong"] = true,
+                ["plugin"] = "AcadEventBridge",
+                ["version"] = "0.1.0",
+                ["pid"] = Process.GetCurrentProcess().Id
+            }
+        };
+    }
+
+    private ResponseMessage BuildStatusResponse(string requestId)
+    {
+        var snapshot = _state.Snapshot();
+        return new ResponseMessage
+        {
+            Id = requestId,
+            Ok = true,
+            Ts = EventJson.UtcNowIso(),
+            Payload = new Dictionary<string, object?>
+            {
+                ["pipe_name"] = PipeName,
+                ["pid"] = Process.GetCurrentProcess().Id,
+                ["last_seq"] = snapshot.LastSeq,
+                ["busy"] = snapshot.Busy,
+                ["command_depth"] = snapshot.CommandDepth,
+                ["lisp_depth"] = snapshot.LispDepth,
+                ["active_doc_id"] = snapshot.ActiveDocId,
+                ["queue_depth"] = _queue.Count,
+                ["dropped_count"] = _queue.DroppedCount,
+                ["object_events_enabled"] = _objectEventsEnabledProvider()
+            }
+        };
     }
 
     private static void WriteLine(Stream stream, string line)

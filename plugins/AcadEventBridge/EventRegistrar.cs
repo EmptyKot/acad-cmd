@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using Autodesk.AutoCAD.ApplicationServices;
+using Autodesk.AutoCAD.DatabaseServices;
 using AcApplication = Autodesk.AutoCAD.ApplicationServices.Core.Application;
 
 namespace AcadEventBridge;
@@ -10,21 +11,62 @@ public sealed class EventRegistrar
 {
     private readonly EventQueue _queue;
     private readonly StateTracker _state;
+    private bool _objectEventsEnabled;
     private readonly object _sync = new();
     private readonly Dictionary<IntPtr, string> _docIds = new();
     private readonly HashSet<IntPtr> _subscribedDocs = new();
     private DocumentCollection? _docs;
     private bool _started;
 
-    public EventRegistrar(EventQueue queue, StateTracker state)
+    public EventRegistrar(EventQueue queue, StateTracker state, bool objectEventsEnabled)
     {
         _queue = queue;
         _state = state;
+        _objectEventsEnabled = objectEventsEnabled;
     }
 
     public bool IsStarted => _started;
 
     public int QueueCapacity => _queue.Capacity;
+
+    public bool ObjectEventsEnabled
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _objectEventsEnabled;
+            }
+        }
+    }
+
+    public void SetObjectEventsEnabled(bool enabled)
+    {
+        Document[] docs = Array.Empty<Document>();
+        lock (_sync)
+        {
+            if (_objectEventsEnabled == enabled)
+            {
+                return;
+            }
+
+            _objectEventsEnabled = enabled;
+            if (_docs is not null)
+            {
+                var list = new List<Document>();
+                foreach (Document doc in _docs)
+                {
+                    list.Add(doc);
+                }
+                docs = list.ToArray();
+            }
+        }
+
+        foreach (var doc in docs)
+        {
+            ApplyObjectEventSubscription(doc, enabled);
+        }
+    }
 
     public void Start()
     {
@@ -207,6 +249,7 @@ public sealed class EventRegistrar
             doc.LispCancelled += OnLispCancelled;
             doc.UnknownCommand += OnUnknownCommand;
             doc.ImpliedSelectionChanged += OnImpliedSelectionChanged;
+            SubscribeObjectEventsUnsafe(doc);
             _subscribedDocs.Add(key);
         }
     }
@@ -235,8 +278,56 @@ public sealed class EventRegistrar
             doc.LispCancelled -= OnLispCancelled;
             doc.UnknownCommand -= OnUnknownCommand;
             doc.ImpliedSelectionChanged -= OnImpliedSelectionChanged;
+            UnsubscribeObjectEventsUnsafe(doc);
             _subscribedDocs.Remove(key);
         }
+    }
+
+    private void ApplyObjectEventSubscription(Document? doc, bool enabled)
+    {
+        if (doc is null)
+        {
+            return;
+        }
+
+        var key = doc.UnmanagedObject;
+        lock (_sync)
+        {
+            if (!_subscribedDocs.Contains(key))
+            {
+                return;
+            }
+
+            if (enabled)
+            {
+                SubscribeObjectEventsUnsafe(doc);
+            }
+            else
+            {
+                UnsubscribeObjectEventsUnsafe(doc);
+            }
+        }
+    }
+
+    private void SubscribeObjectEventsUnsafe(Document doc)
+    {
+        if (!_objectEventsEnabled)
+        {
+            return;
+        }
+
+        var db = doc.Database;
+        db.ObjectAppended += OnObjectAppended;
+        db.ObjectModified += OnObjectModified;
+        db.ObjectErased += OnObjectErased;
+    }
+
+    private void UnsubscribeObjectEventsUnsafe(Document doc)
+    {
+        var db = doc.Database;
+        db.ObjectAppended -= OnObjectAppended;
+        db.ObjectModified -= OnObjectModified;
+        db.ObjectErased -= OnObjectErased;
     }
 
     private void OnCommandWillStart(object sender, CommandEventArgs e)
@@ -390,6 +481,58 @@ public sealed class EventRegistrar
             });
     }
 
+    private void OnObjectAppended(object sender, ObjectEventArgs e)
+    {
+        HandleObjectEvent("object_appended", sender, e.DBObject, erased: null);
+    }
+
+    private void OnObjectModified(object sender, ObjectEventArgs e)
+    {
+        HandleObjectEvent("object_modified", sender, e.DBObject, erased: null);
+    }
+
+    private void OnObjectErased(object sender, ObjectErasedEventArgs e)
+    {
+        if (!e.Erased)
+        {
+            return;
+        }
+
+        HandleObjectEvent("object_erased", sender, e.DBObject, erased: e.Erased);
+    }
+
+    private void HandleObjectEvent(string eventName, object sender, DBObject? dbObject, bool? erased)
+    {
+        if (!_started || !ObjectEventsEnabled)
+        {
+            return;
+        }
+
+        var doc = TryResolveDocumentFromDatabase(sender as Database);
+        var docId = EnsureDocId(doc);
+        if (doc?.IsActive ?? false)
+        {
+            _state.ActiveDocId = docId;
+        }
+
+        var payload = new Dictionary<string, object?>
+        {
+            ["command_depth"] = _state.CommandDepth,
+            ["lisp_depth"] = _state.LispDepth,
+            ["busy"] = _state.Busy,
+            ["object_type"] = TryGetObjectType(dbObject),
+            ["dxf_name"] = TryGetObjectDxfName(dbObject),
+            ["handle"] = TryGetObjectHandle(dbObject),
+            ["layer"] = TryGetObjectLayer(dbObject)
+        };
+        if (erased.HasValue)
+        {
+            payload["erased"] = erased.Value;
+        }
+
+        EnqueueObjectEvent(eventName, doc, docId, payload);
+    }
+
     private void EnqueueDocumentEvent(string eventName, Document? doc, string docId)
     {
         var (docName, docPath) = ResolveDocNamePath(doc);
@@ -465,6 +608,111 @@ public sealed class EventRegistrar
             Payload = payload
         };
         _queue.Enqueue(EventJson.SerializeEvent(ev));
+    }
+
+    private void EnqueueObjectEvent(
+        string eventName,
+        Document? doc,
+        string docId,
+        Dictionary<string, object?> payload)
+    {
+        var (docName, docPath) = ResolveDocNamePath(doc);
+        var ev = new EventMessage
+        {
+            Seq = _state.NextSeq(),
+            Ts = EventJson.UtcNowIso(),
+            Source = "database",
+            Event = eventName,
+            DocId = docId,
+            DocName = docName,
+            DocPath = docPath,
+            Payload = payload
+        };
+        _queue.Enqueue(EventJson.SerializeEvent(ev));
+    }
+
+    private Document? TryResolveDocumentFromDatabase(Database? db)
+    {
+        if (db is null || _docs is null)
+        {
+            return null;
+        }
+
+        foreach (Document candidate in _docs)
+        {
+            try
+            {
+                if (ReferenceEquals(candidate.Database, db))
+                {
+                    return candidate;
+                }
+            }
+            catch
+            {
+                // Ignore transient document access errors in event context.
+            }
+        }
+
+        return null;
+    }
+
+    private static string? TryGetObjectType(DBObject? dbObject)
+    {
+        try
+        {
+            return dbObject?.GetType().Name;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string? TryGetObjectDxfName(DBObject? dbObject)
+    {
+        try
+        {
+            return dbObject?.GetRXClass()?.DxfName;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string? TryGetObjectHandle(DBObject? dbObject)
+    {
+        try
+        {
+            if (dbObject is null)
+            {
+                return null;
+            }
+
+            var objectId = dbObject.ObjectId;
+            return objectId.IsNull ? null : objectId.Handle.ToString();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string? TryGetObjectLayer(DBObject? dbObject)
+    {
+        try
+        {
+            if (dbObject is Entity entity)
+            {
+                return entity.Layer;
+            }
+        }
+        catch
+        {
+            return null;
+        }
+
+        return null;
     }
 
     private static (string? docName, string? docPath) ResolveDocNamePath(Document? doc)

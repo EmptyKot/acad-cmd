@@ -25,6 +25,9 @@ public sealed class HelloMessage
 
     [DataMember(Name = "pid", Order = 5)]
     public int Pid { get; set; }
+
+    [DataMember(Name = "object_events_enabled", Order = 6)]
+    public bool ObjectEventsEnabled { get; set; }
 }
 
 [DataContract]
@@ -89,6 +92,44 @@ public sealed class HeartbeatMessage
     public long DroppedCount { get; set; }
 }
 
+[DataContract]
+public sealed class RequestMessage
+{
+    [DataMember(Name = "type", Order = 1)]
+    public string Type { get; set; } = "request";
+
+    [DataMember(Name = "id", Order = 2)]
+    public string Id { get; set; } = string.Empty;
+
+    [DataMember(Name = "method", Order = 3)]
+    public string Method { get; set; } = string.Empty;
+
+    [DataMember(Name = "payload", Order = 4)]
+    public Dictionary<string, object?> Payload { get; set; } = new();
+}
+
+[DataContract]
+public sealed class ResponseMessage
+{
+    [DataMember(Name = "type", Order = 1)]
+    public string Type { get; set; } = "response";
+
+    [DataMember(Name = "id", Order = 2)]
+    public string Id { get; set; } = string.Empty;
+
+    [DataMember(Name = "ok", Order = 3)]
+    public bool Ok { get; set; } = true;
+
+    [DataMember(Name = "ts", Order = 4)]
+    public string Ts { get; set; } = EventJson.UtcNowIso();
+
+    [DataMember(Name = "payload", Order = 5, EmitDefaultValue = false)]
+    public Dictionary<string, object?>? Payload { get; set; }
+
+    [DataMember(Name = "error", Order = 6, EmitDefaultValue = false)]
+    public string? Error { get; set; }
+}
+
 public static class EventJson
 {
     private static readonly Encoding Utf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
@@ -113,6 +154,60 @@ public static class EventJson
         return Serialize(message);
     }
 
+    public static string SerializeResponse(ResponseMessage message)
+    {
+        return Serialize(message);
+    }
+
+    public static bool TryDeserializeRequest(string json, out RequestMessage? request, out string? error)
+    {
+        request = null;
+        error = null;
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            error = "empty_request";
+            return false;
+        }
+
+        try
+        {
+            var parsed = Deserialize<RequestMessage>(json);
+            if (parsed is null)
+            {
+                error = "request_parse_failed";
+                return false;
+            }
+
+            if (!string.Equals(parsed.Type, "request", StringComparison.OrdinalIgnoreCase))
+            {
+                error = "invalid_request_type";
+                return false;
+            }
+
+            parsed.Id = (parsed.Id ?? string.Empty).Trim();
+            parsed.Method = (parsed.Method ?? string.Empty).Trim();
+            if (string.IsNullOrEmpty(parsed.Id))
+            {
+                error = "missing_request_id";
+                return false;
+            }
+            if (string.IsNullOrEmpty(parsed.Method))
+            {
+                error = "missing_request_method";
+                return false;
+            }
+
+            parsed.Payload ??= new Dictionary<string, object?>();
+            request = parsed;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = ex.GetType().Name;
+            return false;
+        }
+    }
+
     private static string Serialize<T>(T message)
     {
         using var ms = new MemoryStream();
@@ -124,5 +219,18 @@ public static class EventJson
             });
         ser.WriteObject(ms, message);
         return Utf8.GetString(ms.ToArray());
+    }
+
+    private static T? Deserialize<T>(string json)
+    {
+        var bytes = Utf8.GetBytes(json);
+        using var ms = new MemoryStream(bytes);
+        var ser = new DataContractJsonSerializer(
+            typeof(T),
+            new DataContractJsonSerializerSettings
+            {
+                UseSimpleDictionaryFormat = true
+            });
+        return (T?)ser.ReadObject(ms);
     }
 }

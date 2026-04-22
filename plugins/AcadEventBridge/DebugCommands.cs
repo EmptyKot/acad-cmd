@@ -24,6 +24,7 @@ public sealed class DebugCommands
             $"busy={host.Busy}, " +
             $"command_depth={host.CommandDepth}, " +
             $"lisp_depth={host.LispDepth}, " +
+            $"object_events_enabled={host.ObjectEventsEnabled}, " +
             $"queue_depth={host.QueueDepth}, " +
             $"dropped_count={host.DroppedCount}.");
     }
@@ -38,6 +39,34 @@ public sealed class DebugCommands
     public void AebDiag()
     {
         WriteLine("AcadEventBridge diagnostics: queue/state tracker active.");
+    }
+
+    [CommandMethod("AEB_OBJECT_EVENTS_ON")]
+    public void AebObjectEventsOn()
+    {
+        var host = BridgeRuntime.CurrentHost;
+        if (host is null)
+        {
+            WriteLine("AcadEventBridge host is null; cannot enable object events.");
+            return;
+        }
+
+        host.SetObjectEventsEnabled(true);
+        WriteLine("AcadEventBridge object events: enabled.");
+    }
+
+    [CommandMethod("AEB_OBJECT_EVENTS_OFF")]
+    public void AebObjectEventsOff()
+    {
+        var host = BridgeRuntime.CurrentHost;
+        if (host is null)
+        {
+            WriteLine("AcadEventBridge host is null; cannot disable object events.");
+            return;
+        }
+
+        host.SetObjectEventsEnabled(false);
+        WriteLine("AcadEventBridge object events: disabled.");
     }
 
     private static void WriteLine(string message)
